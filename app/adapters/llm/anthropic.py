@@ -1,3 +1,4 @@
+import re
 from typing import Iterable, List, Optional
 
 from anthropic import AsyncAnthropic
@@ -86,23 +87,32 @@ class AnthropicAdapter(LLMPort):
         """
         Returns:
             {
-              "is_valid": "true" | "false",
-              "reason": "<short reason or empty>",
-              "raw": "<model raw text>"
+            "is_valid": "true" | "false",
+            "reason": "<one-liner if invalid or ''>",
+            "normalized": "<normalized claim or None>",
+            "raw": "<model raw text>"
             }
         """
         sys = self._topic_gate_system_prompt(topic=topic)
+
+        # IMPORTANT: user content must NOT be the system prompt
+        user_prompt = (
+            f'Topic: {topic}\n'
+            f'Language hint: {language}\n'
+            'Return exactly one line as specified in the system instructions.'
+        )
+
         resp = await self.client.messages.create(
-            model=self.model,
+            model=self.model,  # ensure this is a valid Anthropic model id string
             system=sys,
             messages=[
                 {
                     'role': 'user',
-                    'content': [{'type': 'text', 'text': sys}],
+                    'content': [{'type': 'text', 'text': user_prompt}],
                 }
             ],
             temperature=0.0,  # deterministic
-            max_tokens=8,  # tiny budget
+            max_tokens=16,  # tiny budget; allow room for 'VALID: <topic>'
         )
 
         out = ''.join(
@@ -111,16 +121,41 @@ class AnthropicAdapter(LLMPort):
             if getattr(block, 'type', None) == 'text'
         ).strip()
 
-        up = out.strip().upper()
+        up = out.upper().strip()
 
+        # 1) INVALID: (full one-liner, localized). Keep the raw line as 'reason'.
         if up.startswith('INVALID'):
-            reason = out.split(':', 1)[1].strip() if ':' in out else ''
-            return {'is_valid': 'false', 'reason': reason, 'raw': out}
+            return {
+                'is_valid': 'false',
+                'reason': out,  # keep full localized one-liner
+                'normalized': None,
+                'raw': out,
+            }
 
-        # 2) VALID must be the entire payload (stand-alone)
-        #    Accept "VALID", or "VALID" with trailing whitespace only
+        # 2) VALID: <normalized_topic>
+        m = re.match(r'^\s*VALID\s*:\s*(.+?)\s*$', out, flags=re.IGNORECASE)
+        if m:
+            normalized = m.group(1)
+            return {
+                'is_valid': 'true',
+                'reason': '',
+                'normalized': normalized,
+                'raw': out,
+            }
+
+        # (optional) backward-compat: accept exact "VALID" with no payload
         if up == 'VALID':
-            return {'is_valid': 'true', 'reason': '', 'raw': out}
+            return {
+                'is_valid': 'true',
+                'reason': '',
+                'normalized': topic,  # or "" if you prefer
+                'raw': out,
+            }
 
-        # 3) Fallback if the model misbehaves
-        return {'is_valid': 'false', 'reason': 'unrecognized', 'raw': out}
+        # 3) Fallback
+        return {
+            'is_valid': 'false',
+            'reason': 'unrecognized',
+            'normalized': None,
+            'raw': out,
+        }
