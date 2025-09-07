@@ -90,3 +90,12 @@ def get_llm_singleton() -> LLMPort:
 
 def reset_llm_singleton_cache():
     get_llm_singleton.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def get_topic_checker_singleton() -> LLMPort:
+    return get_topic_checker()
+
+
+def get_topic_checker() -> LLMPort:
+    return make_claude()
