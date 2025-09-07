@@ -1,3 +1,15 @@
+## v1.7.0 (2025-09-07)
+
+### Feat
+
+- topic checker singleton
+- check topic anthropic adapter
+- topic coherence rules
+
+### Refactor
+
+- update tests to work
+
 ## v1.6.0 (2025-09-07)
 
 ### Feat
