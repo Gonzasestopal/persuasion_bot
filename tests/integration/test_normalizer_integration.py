@@ -31,11 +31,11 @@ async def test_topic_normalizer_valid_en_double_negation_normalizes_anthropic():
     """
     adapter = AnthropicAdapter(
         api_key=os.environ['ANTHROPIC_API_KEY'],
-        model='claude-3-5-sonnet-latest',
+        model='claude-sonnet-4-20250514',
     )
 
     topic = 'I don’t think God does not exist'
-    res = await adapter.check_topic_normalize(topic, language='en')
+    res = await adapter.check_topic(topic, language='en')
 
     assert res['is_valid'] == 'true'
     assert isinstance(res['normalized'], str) and res['normalized'].strip()
@@ -57,11 +57,11 @@ async def test_topic_normalizer_invalid_es_one_liner_anthropic():
     """
     adapter = AnthropicAdapter(
         api_key=os.environ['ANTHROPIC_API_KEY'],
-        model='claude-3-5-sonnet-latest',
+        model='claude-sonnet-4-20250514',
     )
 
     topic = 'hola'
-    res = await adapter.check_topic_normalize(topic, language='es')
+    res = await adapter.check_topic(topic, language='es')
 
     assert res['is_valid'] == 'false'
     assert res['normalized'] is None
@@ -82,11 +82,11 @@ async def test_topic_normalizer_valid_minimal_claim_round_trip_anthropic():
     """
     adapter = AnthropicAdapter(
         api_key=os.environ['ANTHROPIC_API_KEY'],
-        model='claude-3-5-sonnet-latest',
+        model='claude-sonnet-4-20250514',
     )
 
     topic = 'Climate change is real'
-    res = await adapter.check_topic_normalize(topic, language='en')
+    res = await adapter.check_topic(topic, language='en')
 
     assert res['is_valid'] == 'true'
     assert _norm_upper(res['normalized']) == 'CLIMATE CHANGE IS REAL'
