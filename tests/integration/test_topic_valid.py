@@ -131,7 +131,7 @@ def test_turn0_gibberish_topic_es_shows_valid_topic_prompt(client):
     """
     reset_llm_singleton_cache()
 
-    topic = 'asdf??? !!!'
+    topic = 'no se'
     start = f'topic: {topic}. side: CON.'
     r1 = client.post('/messages', json={'conversation_id': None, 'message': start})
     assert r1.status_code == 201, r1.text
