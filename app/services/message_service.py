@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.domain.enums import Stance
-from app.domain.errors import ConversationExpired, ConversationNotFound
+from app.domain.errors import ConversationExpired, ConversationNotFound, InvalidTopic
 from app.domain.parser import assert_no_topic_or_side_markers
 from app.domain.ports.debate_store import DebateStorePort
 from app.domain.ports.llm import LLMPort
@@ -18,6 +18,7 @@ class MessageService(object):
         repo: MessageRepoPort,
         concession_service: Optional[ConcessionService] = None,
         llm: Optional[LLMPort] = None,
+        topic_checker: Optional[LLMPort] = None,
         debate_store: Optional[DebateStorePort] = None,
         history_limit=5,
     ):
@@ -26,6 +27,7 @@ class MessageService(object):
         self.debate_store = debate_store
         self.history_limit = history_limit
         self.llm = llm
+        self.topic_checker = topic_checker
         self.concession_service = concession_service or ConcessionService(
             llm=llm,
             debate_store=self.debate_store,
@@ -40,6 +42,11 @@ class MessageService(object):
         return await self.continue_conversation(message, conversation_id)
 
     async def start_conversation(self, topic: str, stance: Stance, message: str = None):
+        topic_valid = self.topic_checker.check_topic(message)
+
+        if not topic_valid:
+            raise InvalidTopic(message=topic_valid.reason)
+
         conversation = await self.repo.create_conversation(topic=topic, stance=stance)
 
         await self.repo.add_message(
