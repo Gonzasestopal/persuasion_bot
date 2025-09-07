@@ -1,3 +1,9 @@
+## v1.6.0 (2025-09-07)
+
+### Feat
+
+- recommend user for stronger arguments more than 8 words
+
 ## v1.5.0 (2025-09-07)
 
 ### Feat
