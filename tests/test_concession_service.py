@@ -18,24 +18,27 @@ def store():
 
 class FakeLLM(LLMPort):
     async def debate(self, messages):
-        return "fake-llm-reply"
+        return 'fake-llm-reply'
 
     async def generate(self):
-        return "i would glady"
+        return 'i would glady'
+
+    async def check_topic(self, topic):
+        return True
 
 
 def mk_dir(ent: float, neu: float, contra: float):
     # one direction scores
-    return {"entailment": ent, "neutral": neu, "contradiction": contra}
+    return {'entailment': ent, 'neutral': neu, 'contradiction': contra}
 
 
 def mk_bidir(ph, hp):
     # build bidirectional package + agg_max
     agg = {
         k: max(ph.get(k, 0.0), hp.get(k, 0.0))
-        for k in ("entailment", "neutral", "contradiction")
+        for k in ('entailment', 'neutral', 'contradiction')
     }
-    return {"p_to_h": ph, "h_to_p": hp, "agg_max": agg}
+    return {'p_to_h': ph, 'h_to_p': hp, 'agg_max': agg}
 
 
 class FakeNLI:
@@ -68,7 +71,7 @@ class FakeNLI:
         if self.repeat_last and self._last_pkg is not None:
             return self._last_pkg
 
-        raise AssertionError("FakeNLI: no more scripted scores")
+        raise AssertionError('FakeNLI: no more scripted scores')
 
 
 class DummyState:
@@ -76,7 +79,7 @@ class DummyState:
         self.positive_judgements = 0
         self.assistant_turns = 0
         self.match_concluded = False
-        self.lang = "en"
+        self.lang = 'en'
 
     def maybe_conclude(self):
         # conclude once we record a concession (used in analyze_conversation test)
@@ -91,12 +94,12 @@ def make_msgs():
 
     # assistant message must have >= 10 words (alphabetic) to be “valid”
     bot = Msg(
-        "bot",
-        "Presento mi argumento principal. Considera la evidencia empírica disponible y los efectos observados.",
+        'bot',
+        'Presento mi argumento principal. Considera la evidencia empírica disponible y los efectos observados.',
     )
     user = Msg(
-        "user",
-        "Aquí va la respuesta extensa del usuario que contiene más de treinta palabras para pasar la verificación de longitud.",
+        'user',
+        'Aquí va la respuesta extensa del usuario que contiene más de treinta palabras para pasar la verificación de longitud.',
     )
     return [bot, user]
 
@@ -120,27 +123,27 @@ def test_thesis_contradiction_triggers_concession():
     )
     conv = [
         {
-            "role": "assistant",
-            "content": (
-                "el asistente presenta un argumento claro con evidencia solida y varias "
-                "oraciones completas para validar adecuadamente la longitud requerida"
+            'role': 'assistant',
+            'content': (
+                'el asistente presenta un argumento claro con evidencia solida y varias '
+                'oraciones completas para validar adecuadamente la longitud requerida'
             ),
         },
         {
-            "role": "user",
-            "content": (
-                "respuesta del usuario con suficiente longitud para validar el fallback y "
-                "probar el camino de contradiccion de la tesis"
+            'role': 'user',
+            'content': (
+                'respuesta del usuario con suficiente longitud para validar el fallback y '
+                'probar el camino de contradiccion de la tesis'
             ),
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="El trabajo remoto es más productivo"
+        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
     )
-    assert out["concession"] is True
-    assert out["alignment"] == "OPPOSITE"
-    assert out["reason"] == "thesis_opposition_soft"
+    assert out['concession'] is True
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['reason'] == 'thesis_opposition_soft'
 
 
 def test_thesis_support_same_no_concession():
@@ -159,26 +162,26 @@ def test_thesis_support_same_no_concession():
     )
     conv = [
         {
-            "role": "assistant",
-            "content": (
-                "el asistente presenta un argumento claro con evidencia solida y varias "
-                "oraciones completas para validar adecuadamente la longitud requerida"
+            'role': 'assistant',
+            'content': (
+                'el asistente presenta un argumento claro con evidencia solida y varias '
+                'oraciones completas para validar adecuadamente la longitud requerida'
             ),
         },
         {
-            "role": "user",
-            "content": (
-                "respuesta del usuario con suficiente longitud para validar el fallback y "
-                "probar el camino de contradiccion de la tesis"
+            'role': 'user',
+            'content': (
+                'respuesta del usuario con suficiente longitud para validar el fallback y '
+                'probar el camino de contradiccion de la tesis'
             ),
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="Los perros son los mejores amigos del ser humano"
+        conv, Stance.PRO, topic='Los perros son los mejores amigos del ser humano'
     )
-    assert out["alignment"] == "SAME"
-    assert out["concession"] is False  # support does NOT count
+    assert out['alignment'] == 'SAME'
+    assert out['concession'] is False  # support does NOT count
 
 
 def test_pairwise_contradiction_fallback():
@@ -200,21 +203,21 @@ def test_pairwise_contradiction_fallback():
     # ensure user has >= 30 chars/words; our service checks length >= 30 for fallback
     conv = [
         {
-            "role": "assistant",
-            "content": "el asistente escribe un texto suficientemente largo con más de diez palabras válidas en total.",
+            'role': 'assistant',
+            'content': 'el asistente escribe un texto suficientemente largo con más de diez palabras válidas en total.',
         },
         {
-            "role": "user",
-            "content": "este es un texto de usuario bastante largo que supera con facilidad el umbral de longitud exigido por el servicio.",
+            'role': 'user',
+            'content': 'este es un texto de usuario bastante largo que supera con facilidad el umbral de longitud exigido por el servicio.',
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.CON, topic="Las redes sociales han mejorado la conexión humana"
+        conv, Stance.CON, topic='Las redes sociales han mejorado la conexión humana'
     )
-    assert out["alignment"] == "OPPOSITE"
-    assert out["reason"] == "pairwise_opposition_soft"
-    assert out["concession"] is True
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['reason'] == 'pairwise_opposition_soft'
+    assert out['concession'] is True
 
 
 def test_underdetermined_no_concession():
@@ -233,18 +236,18 @@ def test_underdetermined_no_concession():
     )
     conv = [
         {
-            "role": "assistant",
-            "content": "texto del asistente con varias oraciones para cumplir el mínimo de palabras requerido.",
+            'role': 'assistant',
+            'content': 'texto del asistente con varias oraciones para cumplir el mínimo de palabras requerido.',
         },
         {
-            "role": "user",
-            "content": "texto del usuario sin posicionamiento claro ni relación directa con la tesis.",
+            'role': 'user',
+            'content': 'texto del usuario sin posicionamiento claro ni relación directa con la tesis.',
         },
     ]
 
-    out = svc.judge_last_two_messages(conv, Stance.PRO, topic="Tema cualquiera")
-    assert out["alignment"] == "UNKNOWN"
-    assert out["concession"] is False
+    out = svc.judge_last_two_messages(conv, Stance.PRO, topic='Tema cualquiera')
+    assert out['alignment'] == 'UNKNOWN'
+    assert out['concession'] is False
 
 
 @pytest.mark.asyncio
@@ -275,7 +278,7 @@ async def test_analyze_conversation_increments_on_contradiction_and_concludes(
     # The service expects Message objects with .role and .message;
     # our make_msgs returns a simple class that matches that.
     result = await svc.analyze_conversation(
-        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic="Tema X"
+        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic='Tema X'
     )
 
     # Since maybe_conclude() returns True after first concession, analyze_conversation returns verdict string
@@ -306,20 +309,20 @@ def test_short_user_blocks_concession_on_thesis_contradiction():
     conv = [
         # Asistente válido (≥10 palabras alfabéticas)
         {
-            "role": "assistant",
-            "content": "el asistente presenta un argumento claro con evidencia solida y varias oraciones completas",
+            'role': 'assistant',
+            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
         },
         # Usuario MUY corto (menos de 8 palabras)
-        {"role": "user", "content": "no estoy de acuerdo"},
+        {'role': 'user', 'content': 'no estoy de acuerdo'},
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="El trabajo remoto es más productivo"
+        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
     )
-    assert out["concession"] is False
-    assert out["reason"] == "too_short"
+    assert out['concession'] is False
+    assert out['reason'] == 'too_short'
     assert (
-        out["alignment"] == "UNKNOWN"
+        out['alignment'] == 'UNKNOWN'
     )  # la rama too_short deja el alineamiento como UNKNOWN
 
 
@@ -344,18 +347,18 @@ def test_strong_thesis_contradiction_overrides_min_words():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "el asistente presenta un argumento claro con evidencia solida y varias oraciones completas",
+            'role': 'assistant',
+            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
         },
-        {"role": "user", "content": "no"},
+        {'role': 'user', 'content': 'no'},
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.CON, topic="Las redes sociales han mejorado la conexión humana"
+        conv, Stance.CON, topic='Las redes sociales han mejorado la conexión humana'
     )
-    assert out["concession"] is True
-    assert out["reason"] == "thesis_opposition_soft"
-    assert out["alignment"] == "OPPOSITE"
+    assert out['concession'] is True
+    assert out['reason'] == 'thesis_opposition_soft'
+    assert out['alignment'] == 'OPPOSITE'
 
 
 def test_short_user_blocks_pairwise_fallback():
@@ -382,16 +385,16 @@ def test_short_user_blocks_pairwise_fallback():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "el asistente presenta un argumento claro con evidencia solida y varias oraciones completas",
+            'role': 'assistant',
+            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
         },
-        {"role": "user", "content": "eso no"},
+        {'role': 'user', 'content': 'eso no'},
     ]
 
-    out = svc.judge_last_two_messages(conv, Stance.PRO, topic="Tema cualquiera")
-    assert out["concession"] is False
-    assert out["reason"] == "too_short"
-    assert out["alignment"] == "UNKNOWN"
+    out = svc.judge_last_two_messages(conv, Stance.PRO, topic='Tema cualquiera')
+    assert out['concession'] is False
+    assert out['reason'] == 'too_short'
+    assert out['alignment'] == 'UNKNOWN'
 
 
 def test_off_topic_blocks_pairwise_concession_even_if_pair_contradiction():
@@ -417,22 +420,22 @@ def test_off_topic_blocks_pairwise_concession_even_if_pair_contradiction():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "el asistente presenta un argumento claro con evidencia solida y varias oraciones completas",
+            'role': 'assistant',
+            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
         },
         {
-            "role": "user",
+            'role': 'user',
             # suficiente longitud para no activar 'too_short'
-            "content": "hablo sobre recetas de cocina y especias aromaticas nada que ver con productividad laboral remota",
+            'content': 'hablo sobre recetas de cocina y especias aromaticas nada que ver con productividad laboral remota',
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="El trabajo remoto es más productivo"
+        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
     )
-    assert out["concession"] is False
-    assert out["alignment"] == "UNKNOWN"
-    assert out["reason"] == "off_topic"
+    assert out['concession'] is False
+    assert out['alignment'] == 'UNKNOWN'
+    assert out['reason'] == 'off_topic'
 
 
 def test_multilingual_thesis_contradiction_spanish_user():
@@ -456,25 +459,25 @@ def test_multilingual_thesis_contradiction_spanish_user():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "the assistant presents a clear argument with solid evidence and several complete sentences to validate length",
+            'role': 'assistant',
+            'content': 'the assistant presents a clear argument with solid evidence and several complete sentences to validate length',
         },
         {
-            "role": "user",
+            'role': 'user',
             # Spanish, clearly opposing the English thesis; long enough to pass length checks
-            "content": (
-                "No es cierto que el trabajo remoto sea más productivo que el trabajo en oficina; "
-                "las distracciones domésticas y la falta de supervisión reducen el rendimiento."
+            'content': (
+                'No es cierto que el trabajo remoto sea más productivo que el trabajo en oficina; '
+                'las distracciones domésticas y la falta de supervisión reducen el rendimiento.'
             ),
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="Remote work is more productive than office work"
+        conv, Stance.PRO, topic='Remote work is more productive than office work'
     )
-    assert out["alignment"] == "OPPOSITE"
-    assert out["concession"] is True
-    assert out["reason"] == "thesis_opposition_soft"
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['concession'] is True
+    assert out['reason'] == 'thesis_opposition_soft'
 
 
 def test_multilingual_thesis_contradiction_english_user():
@@ -491,24 +494,24 @@ def test_multilingual_thesis_contradiction_english_user():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "el asistente presenta un argumento claro con evidencia y varias oraciones completas para validar la longitud requerida",
+            'role': 'assistant',
+            'content': 'el asistente presenta un argumento claro con evidencia y varias oraciones completas para validar la longitud requerida',
         },
         {
-            "role": "user",
-            "content": (
-                "It is not true that social media has improved human connection; "
-                "it encourages superficial interactions and weakens trust."
+            'role': 'user',
+            'content': (
+                'It is not true that social media has improved human connection; '
+                'it encourages superficial interactions and weakens trust.'
             ),
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="Las redes sociales han mejorado la conexión humana"
+        conv, Stance.PRO, topic='Las redes sociales han mejorado la conexión humana'
     )
-    assert out["alignment"] == "OPPOSITE"
-    assert out["concession"] is True
-    assert out["reason"] == "thesis_opposition_soft"
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['concession'] is True
+    assert out['reason'] == 'thesis_opposition_soft'
 
 
 def test_sentence_splitting_and_max_contra():
@@ -531,27 +534,27 @@ def test_sentence_splitting_and_max_contra():
 
     conv = [
         {
-            "role": "assistant",
-            "content": "The assistant gives a long claim with evidence and examples to ensure word count.",
+            'role': 'assistant',
+            'content': 'The assistant gives a long claim with evidence and examples to ensure word count.',
         },
         {
-            "role": "user",
-            "content": (
-                "Primera oración es neutral y no contradice de manera explícita. "
-                "Sin embargo, no es cierto que el universo requiera un creador; "
-                "las leyes físicas pueden surgir naturalmente."
+            'role': 'user',
+            'content': (
+                'Primera oración es neutral y no contradice de manera explícita. '
+                'Sin embargo, no es cierto que el universo requiera un creador; '
+                'las leyes físicas pueden surgir naturalmente.'
             ),
         },
     ]
 
     out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic="The universe requires a creator"
+        conv, Stance.PRO, topic='The universe requires a creator'
     )
     # Because the second sentence is strongly contradictory, service should catch it
-    assert out["alignment"] == "OPPOSITE"
-    assert out["concession"] is True
-    assert out["reason"] == "thesis_opposition_soft"
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['concession'] is True
+    assert out['reason'] == 'thesis_opposition_soft'
     # Because the second sentence is strongly contradictory, service should catch it
-    assert out["alignment"] == "OPPOSITE"
-    assert out["concession"] is True
-    assert out["reason"] == "thesis_opposition_soft"
+    assert out['alignment'] == 'OPPOSITE'
+    assert out['concession'] is True
+    assert out['reason'] == 'thesis_opposition_soft'

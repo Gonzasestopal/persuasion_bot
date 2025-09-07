@@ -11,3 +11,6 @@ class DummyLLMAdapter(LLMPort):
 
     async def debate(self, messages: List[Message], state: DebateState) -> str:
         return f'After considering your last {len(messages)} messages, this is not totally correct.'
+
+    async def check_topic(topic: str) -> bool:
+        return True

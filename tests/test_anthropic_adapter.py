@@ -9,6 +9,11 @@ from app.domain.models import Conversation, Message
 pytestmark = pytest.mark.unit
 
 
+class FakeClient:
+    def __init__(self, calls, output_text='FAKE-OUTPUT'):
+        self.messages = FakeMessages(calls, output_text)
+
+
 class FakeMessages:
     def __init__(self, calls, output_text='FAKE-OUTPUT'):
         self.calls = calls

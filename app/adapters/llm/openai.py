@@ -95,7 +95,6 @@ class OpenAIAdapter(LLMPort):
         mapped = self._map_history(messages)
         input_msgs = [{'role': 'system', 'content': system_prompt}, *mapped]
         return self._request(input_msgs)
-        return self._request(input_msgs)
-        return self._request(input_msgs)
-        return self._request(input_msgs)
-        return self._request(input_msgs)
+
+    async def check_topic(self, topic: str, language: str = 'en') -> dict:
+        raise NotImplementedError
