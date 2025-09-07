@@ -1,3 +1,18 @@
+## v1.5.0 (2025-09-07)
+
+### Feat
+
+- restrict stance language and topic
+- pass topic to context
+
+### Fix
+
+- set debate statelanguage after bot reply
+
+### Refactor
+
+- split integration tests
+
 ## v1.4.1 (2025-09-05)
 
 ### Refactor
