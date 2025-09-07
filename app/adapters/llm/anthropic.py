@@ -104,18 +104,23 @@ class AnthropicAdapter(LLMPort):
             temperature=0.0,  # deterministic
             max_tokens=8,  # tiny budget
         )
+
         out = ''.join(
             block.text
             for block in resp.content
             if getattr(block, 'type', None) == 'text'
         ).strip()
 
-        up = out.upper()
-        if 'VALID' in up:
-            return {'is_valid': 'true', 'reason': '', 'raw': out}
+        up = out.strip().upper()
 
         if up.startswith('INVALID'):
             reason = out.split(':', 1)[1].strip() if ':' in out else ''
             return {'is_valid': 'false', 'reason': reason, 'raw': out}
-        # Fallback if the model misbehaves
+
+        # 2) VALID must be the entire payload (stand-alone)
+        #    Accept "VALID", or "VALID" with trailing whitespace only
+        if up == 'VALID':
+            return {'is_valid': 'true', 'reason': '', 'raw': out}
+
+        # 3) Fallback if the model misbehaves
         return {'is_valid': 'false', 'reason': 'unrecognized', 'raw': out}

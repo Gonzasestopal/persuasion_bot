@@ -32,7 +32,7 @@ def expected_offtopic_nudge(topic: str, lang: str) -> str:
     Return a normalized substring we expect to see in the off-topic nudge.
     Keep this loose so different phrasings still pass.
     """
-    return 'keep on topic' if lang == 'en' else _norm('Mantengámonos en el tema')
+    return 'keep on topic' if lang == 'en' else 'Mantengámonos en el tema'
 
 
 def _last_bot_msg(resp_json):

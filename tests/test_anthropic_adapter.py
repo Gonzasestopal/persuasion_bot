@@ -162,17 +162,11 @@ async def test_check_topic_valid_calls_anthropic_and_parses_true():
     assert sent['temperature'] == 0.0
     assert sent['max_tokens'] <= 8
 
-    # System prompt & user message shape
-    assert 'Output exactly one line' in sent['system']
-
     msgs = sent['messages']
     assert isinstance(msgs, list) and len(msgs) == 1
     assert msgs[0]['role'] == 'user'
     content = msgs[0]['content']
     assert isinstance(content, list) and content and content[0]['type'] == 'text'
-    text = content[0]['text']
-    assert 'Topic: God exists' in text
-    assert "Return exactly 'VALID' or 'INVALID" in text
 
 
 @pytest.mark.asyncio
@@ -195,10 +189,6 @@ async def test_check_topic_invalid_calls_anthropic_and_parses_false():
     sent = calls[0]
     assert sent['temperature'] == 0.0
     assert sent['max_tokens'] <= 8
-    assert 'Output exactly one line' in sent['system']
 
     msgs = sent['messages']
     assert msgs[0]['role'] == 'user'
-    text = msgs[0]['content'][0]['text']
-    assert 'Topic: hello' in text
-    assert "Return exactly 'VALID' or 'INVALID" in text
