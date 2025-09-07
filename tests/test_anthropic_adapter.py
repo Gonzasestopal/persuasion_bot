@@ -141,43 +141,64 @@ async def test_adapter_debate_maps_roles_and_respects_history():
 
 
 @pytest.mark.asyncio
-async def test_check_topic_valid_calls_openai_and_parses_true():
+async def test_check_topic_valid_calls_anthropic_and_parses_true():
     calls = []
-    client = FakeClient(calls, output_text='VALID')
-    adapter = AnthropicAdapter(api_key='sk-test', client=client, model='gpt-4o')
+    client = FakeAsyncAnthropic(calls, output_text='VALID')
+    adapter = AnthropicAdapter(
+        api_key='sk-test', client=client, model='claude-3-5-sonnet-latest'
+    )
 
     result = await adapter.check_topic('God exists', language='en')
+
+    # Parsed result
     assert result['is_valid'] == 'true'
     assert result['reason'] == ''
     assert result['raw'] == 'VALID'
 
+    # Exactly one Anthropic call with expected params
     assert len(calls) == 1
     sent = calls[0]
-    assert sent['model'] == 'gpt-4o'
-    # topic gate should be deterministic & tiny
+    assert sent['model'] == 'claude-3-5-sonnet-latest'
     assert sent['temperature'] == 0.0
-    assert sent['max_output_tokens'] <= 8
+    assert sent['max_tokens'] <= 8
 
-    msgs = sent['input']
-    assert msgs[0]['role'] == 'system'
-    assert 'Output format (exactly one line)' in msgs[0]['content']
-    assert msgs[1]['role'] == 'user'
-    assert 'Topic: God exists' in msgs[1]['content']
-    assert "Return exactly 'VALID' or 'INVALID" in msgs[1]['content']
+    # System prompt & user message shape
+    assert 'Output exactly one line' in sent['system']
+
+    msgs = sent['messages']
+    assert isinstance(msgs, list) and len(msgs) == 1
+    assert msgs[0]['role'] == 'user'
+    content = msgs[0]['content']
+    assert isinstance(content, list) and content and content[0]['type'] == 'text'
+    text = content[0]['text']
+    assert 'Topic: God exists' in text
+    assert "Return exactly 'VALID' or 'INVALID" in text
 
 
 @pytest.mark.asyncio
-async def test_check_topic_invalid_calls_openai_and_parses_false():
+async def test_check_topic_invalid_calls_anthropic_and_parses_false():
     calls = []
-    client = FakeClient(calls, output_text='INVALID: greeting')
-    adapter = AnthropicAdapter(api_key='sk-test', client=client, model='gpt-4o')
+    client = FakeAsyncAnthropic(calls, output_text='INVALID: greeting')
+    adapter = AnthropicAdapter(
+        api_key='sk-test', client=client, model='claude-3-5-sonnet-latest'
+    )
 
     result = await adapter.check_topic('hello', language='en')
+
+    # Parsed result
     assert result['is_valid'] == 'false'
     assert 'greeting' in result['reason']
     assert result['raw'].startswith('INVALID')
 
+    # Call shape
     assert len(calls) == 1
     sent = calls[0]
     assert sent['temperature'] == 0.0
-    assert sent['max_output_tokens'] <= 8
+    assert sent['max_tokens'] <= 8
+    assert 'Output exactly one line' in sent['system']
+
+    msgs = sent['messages']
+    assert msgs[0]['role'] == 'user'
+    text = msgs[0]['content'][0]['text']
+    assert 'Topic: hello' in text
+    assert "Return exactly 'VALID' or 'INVALID" in text

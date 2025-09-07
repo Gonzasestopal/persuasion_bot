@@ -81,8 +81,9 @@ def test_get_service_returns_message_service_and_wires_everything():
     assert ms.concession_service is concession
     assert ms.debate_store is store
 
-    # Ensure we didn't accidentally stash the topic_checker on the service
-    assert not hasattr(ms, 'topic_checker')
+    # NEW: the service keeps topic_checker
+    assert hasattr(ms, 'topic_checker')
+    assert ms.topic_checker is topic_checker
 
 
 def test_get_service_accepts_alternate_instances_without_sharing():

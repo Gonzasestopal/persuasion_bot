@@ -31,5 +31,6 @@ def get_service(
         repo=repo,
         llm=llm,
         concession_service=concession,
+        topic_checker=topic_checker,
         debate_store=debate_store,
     )
