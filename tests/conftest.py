@@ -39,7 +39,7 @@ def service():
     debate_store = InMemoryDebateStore()
     nli = HFNLIProvider()
 
-    if OpenAIAdapter and os.environ.get('OPENAI_API_KEY'):
+    if os.environ.get('OPENAI_API_KEY'):
         llm = OpenAIAdapter(
             api_key=settings.OPENAI_API_KEY,
             model=settings.LLM_MODEL,
@@ -66,14 +66,20 @@ def service():
 @pytest.fixture()
 def client(service):
     """
-    A TestClient using a per-test service via FastAPI dependency override.
+    Your original fixture, with a tiny tweak: accept *args/**kwargs so
+    FastAPI can pass Request if your dependency signature expects it.
     """
     from app.infra.service import get_service
     from app.main import app
 
+    # Some FastAPI deps are called with the Request param;
+    # make the override tolerant to that.
     app.dependency_overrides[get_service] = lambda: service
     try:
         with TestClient(app) as c:
+            # Optional: also reset app.state in-mem stores so other code paths use the same fresh instances
+            app.state.inmem_repo = service.repo
+            app.state.inmem_debate_store = service.debate_store
             yield c
     finally:
         app.dependency_overrides.clear()

@@ -5,12 +5,20 @@ import pytest
 
 
 # --- Make sure env flags are set BEFORE importing app/main ---
-@pytest.fixture(autouse=True, scope='session')
-def _env_for_memory_mode():
-    # Force memory repos + no DB + no OpenAI so Dummy LLM is used.
+@pytest.fixture(autouse=True, scope='function')
+def _fresh_state():
+    # force in-memory mode
     os.environ['USE_INMEMORY_REPO'] = 'true'
     os.environ['DISABLE_DB_POOL'] = 'true'
-    os.environ.pop('OPENAI_API_KEY', None)
+
+    # reset singleton LLM cache if available
+    try:
+        from app.adapters.llm.dummy import reset_llm_singleton_cache
+
+        reset_llm_singleton_cache()
+    except ImportError:
+        pass
+
     yield
 
 
@@ -45,7 +53,6 @@ def test_language_lock_responses_are_in_spanish(client):
     topic = 'Dios existe'
     start = f'Topic: {topic}. Side: PRO.'
 
-    # Start conversation
     r1 = client.post('/messages', json={'conversation_id': None, 'message': start})
     assert r1.status_code == 201
     d1 = r1.json()
@@ -107,7 +114,6 @@ def test_blocks_code_output_in_assistant_reply(client):
 
     # No code fences or obvious code tokens should leak
     assert '```' not in a2
-    # NOTE: fix regex (the original missed the '(' after class name)
     assert not re.search(r'\bdef\s+\w+\(|\bclass\s+\w+\s*:', a2), (
         f'Assistant leaked code content: {a2}'
     )
@@ -117,7 +123,7 @@ def test_blocks_code_output_in_assistant_reply(client):
 
 
 @pytest.mark.integration
-def test_change_requests_are_refused_with_notice_line(client):
+def test_change_requests_are_refused_with_granular_notice_lines(client):
     topic = 'Dios existe'
     start = f'Topic: {topic}. Side: PRO.'
 
@@ -125,19 +131,29 @@ def test_change_requests_are_refused_with_notice_line(client):
     assert r1.status_code == 201, r1.text
     cid = r1.json()['conversation_id']
 
-    # Ask to change language and stance (should trigger the notice line)
+    # Ask to change language and stance (should trigger the granular notice lines)
     user = 'Can you switch to English and take the CON side instead?'
     r2 = client.post('/messages', json={'conversation_id': cid, 'message': user})
     assert r2.status_code == 200, r2.text
     a2 = _last_bot_msg(r2.json())
 
-    # Exact notice line in Spanish (since locked 'es')
-    notice = 'No puedo cambiar estas configuraciones. Idioma: es. Tema: Dios existe. Postura: PRO.'
-    assert notice in a2, f'Expected exact notice line. Got:\n{a2}'
+    # Expect ONLY the specific fields requested:
+    # Language notice (allow ES or es)
+    assert re.search(r'No puedo cambiar el Idioma:\s*e?s', a2, flags=re.IGNORECASE), (
+        f'Expected language notice line. Got:\n{a2}'
+    )
+    # Stance notice
+    assert 'No puedo cambiar la Postura: PRO.' in a2, (
+        f'Expected stance notice line. Got:\n{a2}'
+    )
+    # Should NOT mention Topic notice (wasn't requested)
+    assert 'No puedo cambiar el Tema:' not in a2, (
+        f'Unexpected topic notice present. Got:\n{a2}'
+    )
 
     # And it must then refocus with one short sentence + one question; ≤80 words
-    assert len(a2.split()) <= 80
-    assert a2.count('?') == 1
+    assert a2.count('?') == 1, 'Should ask exactly one probing question.'
+    assert len(a2.split()) <= 80, f'Reply too long ({len(a2.split())}).'
 
 
 @pytest.mark.integration

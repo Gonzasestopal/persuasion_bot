@@ -9,27 +9,15 @@ import pytest
 from app.infra.llm import reset_llm_singleton_cache
 from app.infra.service import get_service  # used by _get_service_instance()
 
-# If your server still returns "The debate has already ended.",
-# change this constant accordingly.
+# Server-specific end marker
 END_MARKER = 'The debate has already ended.'
-
-# ----------------------------
-# Helpers
-# ----------------------------
 
 pytestmark = pytest.mark.integration
 
 
-def expected_offtopic_nudge(topic: str, lang: str) -> str:
-    if lang == 'en':
-        return 'keep on topic'
-    if lang == 'es':
-        return 'Mantengámonos en el tema'
-    raise ValueError(f'Unsupported lang {lang!r}')
-
-
-def _last_bot_msg(resp_json):
-    return resp_json['message'][-1]['message']
+# ----------------------------
+# Helpers
+# ----------------------------
 
 
 def _norm(s: str) -> str:
@@ -39,33 +27,179 @@ def _norm(s: str) -> str:
     return s.strip().lower()
 
 
+def expected_offtopic_nudge(topic: str, lang: str) -> str:
+    """
+    Return a normalized substring we expect to see in the off-topic nudge.
+    Keep this loose so different phrasings still pass.
+    """
+    return 'keep on topic' if lang == 'en' else _norm('Mantengámonos en el tema')
+
+
+def _last_bot_msg(resp_json):
+    return resp_json['message'][-1]['message']
+
+
+# --- softened language checks (header-free, no extra deps) ---
+
+
+def looks_like_spanish(text: str) -> bool:
+    # Fast signals: Spanish punctuation / diacritics
+    if any(ch in text for ch in ('¿', '¡')):
+        return True
+    if re.search(r'[áéíóúñÁÉÍÓÚÑ]', text):
+        return True
+
+    t = _norm(text)
+    # Lexical cues (any one is enough)
+    lex = [
+        'pero',
+        'aunque',
+        'todavia',
+        'evidencia',
+        'causalidad',
+        'postura',
+        'mecanismo',
+        'objecion',
+        'productividad',
+        'remoto',
+        'traslado',
+        'enfoque',
+        'asincronico',
+        'asincrono',
+        'asincronia',
+        'autonomia',
+        'argumento',
+        'como crees',
+        'tema',
+        'idioma',
+    ]
+    if any(tok in t for tok in lex):
+        return True
+
+    # Function words fallback: need 3+
+    fun = [' el ', ' la ', ' de ', ' que ', ' y ', ' en ']
+    return sum(f in f' {t} ' for f in fun) >= 3
+
+
+def looks_like_english(text: str) -> bool:
+    t = _norm(text)
+    # Lexical cues (any one is enough)
+    lex = [
+        'however',
+        'although',
+        'evidence',
+        'causality',
+        'stance',
+        'topic',
+        'reason',
+        'reasons',
+        'believe',
+        'support',
+        'existence',
+        'hidden',
+        'hiddenness',
+        'nonresistant',
+        'silence',
+        'argument',
+        "i can't change",
+        "let's focus",
+        'keep on topic',
+    ]
+    if any(tok in t for tok in lex):
+        return True
+
+    # Function words fallback: need 3+
+    fun = [' the ', ' and ', ' is ', ' are ', ' not ']
+    return sum(f in f' {t} ' for f in fun) >= 3
+
+
 def _assert_language_es(text: str):
-    assert 'es' in _norm(text), f"Se esperaba 'ES' en la respuesta, got: {text!r}"
+    assert looks_like_spanish(text), f'Se esperaba español; recibido: {text!r}'
 
 
-def _assert_on_topic_nudge_es(text: str, topic: str):
-    cand = _norm(text)
-    # Accept either explicit topic or generic version; both are fine
-    want1 = _norm('Mantengámonos en el tema')
-    want2 = _norm('Mantengámonos en el tema y en este idioma.')
-    assert want1 in cand or want2 in cand, (
-        f'\nExpected on-topic nudge.\nWanted one of:\n- {want1!r}\n- {want2!r}\nGot:\n- {cand!r}'
-    )
+def assert_language(text: str, expected: str):
+    if expected == 'es':
+        assert looks_like_spanish(text), f'Expected Spanish; got: {text!r}'
+    elif expected == 'en':
+        assert looks_like_english(text), f'Expected English; got: {text!r}'
+    else:
+        raise AssertionError(f'Unsupported lang {expected!r}')
 
 
-def _assert_contains_immutable_notice_es(msg: str, topic: str, stance: str = 'PRO'):
-    """
-    Verifica el aviso inmutable en español, orden-agnóstico y case-insensitive:
-    - Prefijo "No puedo cambiar estas configuraciones."
-    - Campos: "Idioma: ES.", "Tema: {topic}.", "Postura: {stance}."
-    """
+# --- granular notice assertions ---
+
+
+def assert_granular_notice_es(
+    msg: str,
+    *,
+    topic: str,
+    stance: str,
+    expect_lang: bool = False,
+    expect_topic: bool = False,
+    expect_stance: bool = False,
+):
     up = _norm(msg)
-    assert 'no puedo cambiar estas configuraciones.' in up, (
-        f'Falta el prefijo del aviso:\n{msg!r}'
-    )
-    assert 'idioma: es' in up, f"Falta 'Idioma: ES' en:\n{msg!r}"
-    assert f'tema: {_norm(topic)}' in up, f"Falta 'Tema: {topic}' en:\n{msg!r}"
-    assert f'postura: {stance.lower()}' in up, f"Falta 'Postura: {stance}' en:\n{msg!r}"
+    if expect_lang:
+        assert re.search(r'no puedo cambiar el idioma:\s*(es)\.', up), (
+            f'Falta aviso de Idioma. Msg:\n{msg!r}'
+        )
+    else:
+        assert 'no puedo cambiar el idioma:' not in up, (
+            f'Aviso de Idioma no esperado. Msg:\n{msg!r}'
+        )
+
+    if expect_topic:
+        assert 'no puedo cambiar el tema:' in up, f'Falta aviso de Tema. Msg:\n{msg!r}'
+    else:
+        assert 'no puedo cambiar el tema:' not in up, (
+            f'Aviso de Tema no esperado. Msg:\n{msg!r}'
+        )
+
+    if expect_stance:
+        assert f'no puedo cambiar la postura: {stance.lower()}.' in up, (
+            f'Falta aviso de Postura. Msg:\n{msg!r}'
+        )
+    else:
+        assert 'no puedo cambiar la postura:' not in up, (
+            f'Aviso de Postura no esperado. Msg:\n{msg!r}'
+        )
+
+
+def assert_granular_notice_en(
+    msg: str,
+    *,
+    topic: str,
+    stance: str,
+    lang_code: str,
+    expect_lang: bool = False,
+    expect_topic: bool = False,
+    expect_stance: bool = False,
+):
+    up = _norm(msg)
+    if expect_lang:
+        assert f"i can't change language: {lang_code.lower()}." in up, (
+            f'Missing Language notice. Msg:\n{msg!r}'
+        )
+    else:
+        assert "i can't change language:" not in up, (
+            f'Unexpected Language notice. Msg:\n{msg!r}'
+        )
+
+    if expect_topic:
+        assert "i can't change topic:" in up, f'Missing Topic notice. Msg:\n{msg!r}'
+    else:
+        assert "i can't change topic:" not in up, (
+            f'Unexpected Topic notice. Msg:\n{msg!r}'
+        )
+
+    if expect_stance:
+        assert f"i can't change stance: {stance.lower()}." in up, (
+            f'Missing Stance notice. Msg:\n{msg!r}'
+        )
+    else:
+        assert "i can't change stance:" not in up, (
+            f'Unexpected Stance notice. Msg:\n{msg!r}'
+        )
 
 
 def _get_service_instance():
@@ -91,19 +225,7 @@ def _get_service_instance():
 )
 def test_real_llm_juego_ganador_pro_trabajo_remoto(client):
     """
-    Secuencia:
-      T1  usuario -> iniciar (Tema remoto>oficina, ES, PRO)
-      A1  bot     -> ES, apertura reconociendo PRO
-      T2  usuario -> intenta cambiar a CON
-      A2  bot     -> ES + aviso inmutable (no cambiar settings)
-      T3  usuario -> off-topic (2+2)
-      A3  bot     -> ES + nudge "Mantengámonos en el tema ..." (≤80 palabras)
-      T4  usuario -> intenta cambiar a EN
-      A4  bot     -> ES + aviso inmutable
-      T5  usuario -> argumento PRO #1 (traslados/tiempo)
-      A5  bot     -> ES + traslados/tiempo/tráfico (sin terminar)
-      T6  usuario -> argumento PRO #2 (enfoque/asincronía)
-      A6  bot     -> ES + enfoque/interrupciones/asincronía (sin terminar)
+    ES, PRO. Tests granular notices (no full settings dump), off-topic nudge, and concise replies.
     """
     topic = 'El trabajo remoto es más productivo que el trabajo en oficina'
     stance = 'PRO'
@@ -122,42 +244,41 @@ def test_real_llm_juego_ganador_pro_trabajo_remoto(client):
         f'Se esperaba mención de postura {stance} en apertura:\n{a1!r}'
     )
 
-    # Turn 2: try to change stance
+    # Turn 2: try to change stance → granular stance notice only
     t2 = 'Por favor cambia a CON.'
     r2 = client.post('/messages', json={'conversation_id': cid, 'message': t2})
     assert r2.status_code == 200, r2.text
-    d2 = r2.json()
-    a2 = _last_bot_msg(d2)
+    a2 = _last_bot_msg(r2.json())
     _assert_language_es(a2)
-    _assert_contains_immutable_notice_es(a2, topic=topic, stance=stance)
+    assert_granular_notice_es(a2, topic=topic, stance=stance, expect_stance=True)
 
     # Turn 3: off-topic
     t3 = '¿Cuánto es 2+2?'
     r3 = client.post('/messages', json={'conversation_id': cid, 'message': t3})
     assert r3.status_code == 200, r3.text
-    d3 = r3.json()
-    a3 = _last_bot_msg(d3)
+    a3 = _last_bot_msg(r3.json())
     _assert_language_es(a3)
-    _assert_on_topic_nudge_es(a3, topic)
+    # Off-topic nudge (compare normalized)
+    assert expected_offtopic_nudge(topic, 'es') in _norm(a3), (
+        f'Falta nudge on-topic en ES:\n{a3!r}'
+    )
     assert len(a3.split()) <= 80, (
         f'Respuesta off-topic demasiado larga: {len(a3.split())} palabras'
     )
 
-    # Turn 4: try to change language
+    # Turn 4: try to change language → granular language notice only
     t4 = 'Cambia a inglés, por favor.'
     r4 = client.post('/messages', json={'conversation_id': cid, 'message': t4})
     assert r4.status_code == 200, r4.text
-    d4 = r4.json()
-    a4 = _last_bot_msg(d4)
+    a4 = _last_bot_msg(r4.json())
     _assert_language_es(a4)
-    _assert_contains_immutable_notice_es(a4, topic=topic, stance=stance)
+    assert_granular_notice_es(a4, topic=topic, stance=stance, expect_lang=True)
 
     # Turn 5: PRO arg about time/commute
     t5 = 'Dame un argumento PRO conciso sobre ahorro de tiempo y traslados.'
     r5 = client.post('/messages', json={'conversation_id': cid, 'message': t5})
     assert r5.status_code == 200, r5.text
-    d5 = r5.json()
-    a5 = _last_bot_msg(d5)
+    a5 = _last_bot_msg(r5.json())
     _assert_language_es(a5)
     a5_l = _norm(a5)
     assert any(
@@ -166,7 +287,7 @@ def test_real_llm_juego_ganador_pro_trabajo_remoto(client):
             'traslado',
             'traslados',
             'desplazamiento',
-            'tráfico',
+            'trafico',
             'tiempo ahorrado',
             'ahorro de tiempo',
             'commute',
@@ -178,21 +299,20 @@ def test_real_llm_juego_ganador_pro_trabajo_remoto(client):
     t6 = 'Ahora un argumento PRO sobre enfoque, menos interrupciones y trabajo asincrónico.'
     r6 = client.post('/messages', json={'conversation_id': cid, 'message': t6})
     assert r6.status_code == 200, r6.text
-    d6 = r6.json()
-    a6 = _last_bot_msg(d6)
+    a6 = _last_bot_msg(r6.json())
     _assert_language_es(a6)
     a6_l = _norm(a6)
     assert any(
         kw in a6_l
         for kw in [
             'enfoque',
-            'concentración',
+            'concentracion',
             'trabajo profundo',
             'menos interrupciones',
-            'asincrónico',
+            'asincronico',
             'asincrono',
-            'asincronía',
-            'autonomía',
+            'asincronia',
+            'autonomia',
         ]
     ), f'Se esperaba argumento de enfoque/interrupciones/asincronía, recibido:\n{a6!r}'
     assert _norm('match concluded') not in a6_l
@@ -202,12 +322,6 @@ def test_real_llm_juego_ganador_pro_trabajo_remoto(client):
     not os.environ.get('OPENAI_API_KEY'), reason='OPENAI_API_KEY not set'
 )
 def test_concludes_by_five_turns_misaligned_user_vs_CON_bot(client):
-    """
-    Topic: 'Dogs are humans' best friend' | Bot side: CON
-    User sends strong PRO turns (explicitly asserting the positive thesis).
-    Expect the debate to conclude by (or before) the 5th assistant reply.
-    After conclusion, any further user message should produce the END marker.
-    """
     topic = "Dogs are humans' best friend"
     start = f'Topic: {topic}. Side: CON.'
 
@@ -235,7 +349,6 @@ def test_concludes_by_five_turns_misaligned_user_vs_CON_bot(client):
         bot_msg = _last_bot_msg(r.json())
         state = svc.debate_store.get(conversation_id=cid)
         assert bot_msg and bot_msg.strip()
-        # Depending on your logic, you may prefer >= count for robustness
         assert state.positive_judgements == count
         assert END_MARKER not in bot_msg, f'Unexpected immediate end: {bot_msg!r}'
 
@@ -257,12 +370,6 @@ def test_concludes_by_five_turns_misaligned_user_vs_CON_bot(client):
     not os.environ.get('OPENAI_API_KEY'), reason='OPENAI_API_KEY not set'
 )
 def test_concludes_by_five_turns_misaligned_user_vs_PRO_bot(client):
-    """
-    Topic: 'Dogs are humans' best friend' | Bot side: PRO
-    User sends strong CON turns (explicitly denying the positive thesis).
-    Expect the debate to conclude by (or before) the 5th assistant reply.
-    After conclusion, any further user message should produce the END marker.
-    """
     topic = "Dogs are humans' best friend"
     start = f'Topic: {topic}. Side: PRO.'
 
@@ -310,34 +417,17 @@ def test_concludes_by_five_turns_misaligned_user_vs_PRO_bot(client):
 )
 def test_real_llm_winning_game_con_god_exists(client):
     """
-    Conversation script:
-      T1  (user): start -> Topic God exists, Lang EN, Side CON
-      A1 (bot): first reply, must be EN, CON-stated opening
-      T2  (user): try to switch stance to PRO -> bot must refuse & show immutable notice
-      A2 (bot): EN + exact notice
-      T3  (user): off-topic 2+2 -> bot must nudge back to topic (exact line)
-      A3 (bot): EN + exact on-topic nudge
-      T4  (user): try to switch language to Spanish -> bot refuses & shows immutable notice
-      A4 (bot): EN + exact notice
-      T5  (user): ask for an EVIL argument against God's existence -> bot provides CON argument #1
-      A5 (bot): EN + contains 'evil' or 'suffering'
-      T6  (user): ask for DIVINE HIDDENNESS -> bot provides CON argument #2
-      A6 (bot): EN + contains 'hidden' or 'nonresistant' or 'silence'
-    Ensures ≥5 assistant turns and two distinct CON arguments across different turns.
+    EN, CON. Uses granular notices and off-topic nudge; no full settings dump expected.
     """
-
     topic = 'God exists'
     lang = 'en'
     lang_code = 'EN'
     stance = 'CON'
 
-    # tiny convenience
     def last_bot_msg(resp_json):
         return resp_json['message'][-1]['message']
 
-    # Optional: clear any cached singleton LLM instance if your test env uses it
-    if 'reset_llm_singleton_cache' in globals():
-        reset_llm_singleton_cache()
+    reset_llm_singleton_cache()
 
     # ---- Turn 1: start conversation ----
     start_message = 'Topic: God exists. Side: CON.'
@@ -351,7 +441,6 @@ def test_real_llm_winning_game_con_god_exists(client):
     a1 = last_bot_msg(d1)
     assert isinstance(a1, str) and a1.strip()
     assert_language(a1, lang)
-    # Opening turn should mention stance somewhere (per your rules)
     assert 'CON' in a1.upper(), (
         f'Expected first reply to acknowledge CON stance, got: {a1!r}'
     )
@@ -362,13 +451,10 @@ def test_real_llm_winning_game_con_god_exists(client):
     t2 = 'Please switch to PRO.'
     r2 = client.post('/messages', json={'conversation_id': conv_id, 'message': t2})
     assert r2.status_code == 200, r2.text
-    d2 = r2.json()
-    a2 = last_bot_msg(d2)
+    a2 = last_bot_msg(r2.json())
     assert_language(a2, lang)
-
-    notice = expected_immutable_notice(topic, lang_code, stance)
-    assert notice in a2, (
-        f'Missing immutable notice on stance change.\nExpected: {notice!r}\nGot: {a2!r}'
+    assert_granular_notice_en(
+        a2, topic=topic, stance=stance, lang_code=lang_code, expect_stance=True
     )
 
     time.sleep(0.2)
@@ -377,15 +463,13 @@ def test_real_llm_winning_game_con_god_exists(client):
     t3 = 'What is 2+2?'
     r3 = client.post('/messages', json={'conversation_id': conv_id, 'message': t3})
     assert r3.status_code == 200, r3.text
-    d3 = r3.json()
-    a3 = last_bot_msg(d3)
+    a3 = last_bot_msg(r3.json())
     assert_language(a3, lang)
 
     nudge = expected_offtopic_nudge(topic, lang)
-    assert nudge in a3, (
-        f'Missing on-topic nudge for off-topic turn.\nExpected: {nudge!r}\nGot: {a3!r}'
+    assert nudge in _norm(a3), (
+        f'Missing on-topic nudge. Expected contains: {nudge!r}\nGot: {a3!r}'
     )
-    # Keep reply short (≤80 words) per your rules
     assert len(a3.split()) <= 80, f'Off-topic reply too long: {len(a3.split())} words'
 
     time.sleep(0.2)
@@ -394,13 +478,10 @@ def test_real_llm_winning_game_con_god_exists(client):
     t4 = 'Switch to Spanish, please.'
     r4 = client.post('/messages', json={'conversation_id': conv_id, 'message': t4})
     assert r4.status_code == 200, r4.text
-    d4 = r4.json()
-    a4 = last_bot_msg(d4)
+    a4 = last_bot_msg(r4.json())
     assert_language(a4, lang)
-
-    notice2 = expected_immutable_notice(topic, lang_code, stance)
-    assert notice2 in a4, (
-        f'Missing immutable notice on language change.\nExpected: {notice2!r}\nGot: {a4!r}'
+    assert_granular_notice_en(
+        a4, topic=topic, stance=stance, lang_code=lang_code, expect_lang=True
     )
 
     time.sleep(0.2)
@@ -409,15 +490,13 @@ def test_real_llm_winning_game_con_god_exists(client):
     t5 = "Give a concise argument from evil against God's existence."
     r5 = client.post('/messages', json={'conversation_id': conv_id, 'message': t5})
     assert r5.status_code == 200, r5.text
-    d5 = r5.json()
-    a5 = last_bot_msg(d5)
+    a5 = last_bot_msg(r5.json())
     assert_language(a5, lang)
 
-    a5_l = a5.lower()
+    a5_l = _norm(a5)
     assert any(kw in a5_l for kw in ['evil', 'suffering', 'gratuitous harm']), (
         f'Expected an evil-based argument, got: {a5!r}'
     )
-    # ensure it's not conceding authority (no 'Match concluded.' if using AWARE)
     assert 'match concluded' not in a5_l
 
     time.sleep(0.2)
@@ -426,17 +505,14 @@ def test_real_llm_winning_game_con_god_exists(client):
     t6 = 'Now a concise argument from divine hiddenness.'
     r6 = client.post('/messages', json={'conversation_id': conv_id, 'message': t6})
     assert r6.status_code == 200, r6.text
-    d6 = r6.json()
-    a6 = last_bot_msg(d6)
+    a6 = last_bot_msg(r6.json())
     assert_language(a6, lang)
 
-    a6_l = a6.lower()
+    a6_l = _norm(a6)
     assert any(
         kw in a6_l for kw in ['hidden', 'hiddenness', 'nonresistant', 'silence']
     ), f'Expected a hiddenness-based argument, got: {a6!r}'
     assert 'match concluded' not in a6_l
-
-    # We reached ≥ 5 assistant turns (A1..A6) and included two distinct CON arguments.
 
 
 @pytest.mark.skipif(
@@ -445,44 +521,27 @@ def test_real_llm_winning_game_con_god_exists(client):
 def test_ended_state_outputs_exact_marker(client):
     # Start
     r1 = client.post(
-        '/messages',
-        json={'conversation_id': None, 'message': 'Topic: X. Side: PRO.'},
+        '/messages', json={'conversation_id': None, 'message': 'Topic: X. Side: PRO.'}
     )
     assert r1.status_code == 201
     d1 = r1.json()
     cid = d1['conversation_id']
 
-    # Flip debate status to ENDED in your store (adapt to your app’s API)
+    # Flip debate status to ENDED
     from app.infra.service import get_service
     from app.main import app as fastapi_app
 
     override = fastapi_app.dependency_overrides.get(get_service)
-
-    svc = override()  # call the override factory to get the concrete service
+    svc = override()
 
     state = svc.debate_store.get(conversation_id=cid)
     state.match_concluded = True
     svc.debate_store.save(conversation_id=cid, state=state)
 
-    # Any follow-up from user now should yield the exact marker
+    # Any follow-up yields exact marker
     r2 = client.post(
         '/messages', json={'conversation_id': cid, 'message': 'keep going?'}
     )
     assert r2.status_code == 200
     a2 = r2.json()['message'][-1]['message']
-    assert 'The debate has already ended.' in a2
-
-
-def expected_immutable_notice(topic: str, lang_code: str, stance: str) -> str:
-    # English immutable notice, per Change-Request Handling in AWARE_SYSTEM_PROMPT
-    return "I can't change these settings."
-
-
-# Helper from your previous tests:
-def assert_language(text: str, expected: str):
-    if expected == 'es':
-        assert 'ES' in text.upper(), f"Expected 'ES' in reply, got: {text!r}"
-    elif expected == 'en':
-        assert 'EN' in text.upper(), f"Expected 'EN' in reply, got: {text!r}"
-    else:
-        raise AssertionError(f'Unsupported lang {expected!r}')
+    assert END_MARKER in a2
