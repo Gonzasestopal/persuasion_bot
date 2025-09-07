@@ -77,19 +77,3 @@ def client(service):
             yield c
     finally:
         app.dependency_overrides.clear()
-        app.dependency_overrides.clear()
-
-
-@pytest.fixture(autouse=True)
-def _reset_inmemory_state(service):
-    # Make sure anything the service holds is pristine *within* the test too.
-    if hasattr(service, 'debate_store'):
-        if hasattr(service.debate_store, 'clear_all'):
-            service.debate_store.clear_all()
-        elif hasattr(service.debate_store, 'clear'):
-            service.debate_store.clear()
-    if hasattr(service, 'repo'):
-        if hasattr(service.repo, 'clear_all'):
-            service.repo.clear_all()
-        elif hasattr(service.repo, 'clear'):
-            service.repo.clear()

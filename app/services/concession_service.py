@@ -505,3 +505,41 @@ class ConcessionService:
             'bot_text_sample': bot_txt,
             'topic': topic,
         }
+
+    def _max_contra_self_vs_sentences(
+        self, canon_self: str, user_txt: str
+    ) -> Tuple[float, float, Dict[str, Dict[str, float]]]:
+        """
+        Scan user sentences against the canonical self-thesis and return:
+          (max_contradiction, entailment_at_that_sentence, scores_for_that_sentence)
+        If no sentences are found, returns (0.0, 0.0, {}).
+        """
+        if not user_txt or not canon_self:
+            return 0.0, 0.0, {}
+
+        # Split into sentences; drop pure questions
+        parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', user_txt) if p.strip()]
+        sentences: List[str] = []
+        for s in parts:
+            s2 = drop_questions(s).strip()
+            if not s2 or s.endswith('?'):
+                continue
+            if not s2.endswith(('.', '!', '?')):
+                s2 += '.'
+            sentences.append(s2)
+
+        max_contra = 0.0
+        ent_at_max = 0.0
+        scores_at_max: Dict[str, Dict[str, float]] = {}
+
+        for s in sentences:
+            sc = self.nli.bidirectional_scores(canon_self, s)
+            agg = agg_max(sc)
+            ent = float(agg.get('entailment', 0.0))
+            con = float(agg.get('contradiction', 0.0))
+            if con >= max_contra:
+                max_contra = con
+                ent_at_max = ent
+                scores_at_max = sc
+
+        return max_contra, ent_at_max, scores_at_max
