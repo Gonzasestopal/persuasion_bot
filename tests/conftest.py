@@ -23,6 +23,7 @@ def service():
     This prevents cross-test leakage of debate state and messages.
     """
     # Local imports to avoid importing app.main before env is set
+    from app.adapters.llm.anthropic import AnthropicAdapter
     from app.adapters.llm.dummy import DummyLLMAdapter
     from app.adapters.llm.openai import OpenAIAdapter
     from app.adapters.nli.hf_nli import HFNLIProvider
@@ -38,6 +39,13 @@ def service():
     repo = InMemoryMessageRepo()
     debate_store = InMemoryDebateStore()
     nli = HFNLIProvider()
+
+    if os.environ.get('ANTHROPIC_API_KEY'):
+        topic_checker = AnthropicAdapter(
+            api_key=settings.ANTHROPIC_API_KEY,
+        )
+    else:
+        topic_checker = DummyLLMAdapter()
 
     if os.environ.get('OPENAI_API_KEY'):
         llm = OpenAIAdapter(
@@ -56,6 +64,7 @@ def service():
 
     return MessageService(
         parser=parse_topic_side,
+        topic_checker=topic_checker,
         repo=repo,
         llm=llm,
         debate_store=debate_store,
