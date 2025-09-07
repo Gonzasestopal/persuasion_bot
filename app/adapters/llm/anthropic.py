@@ -74,5 +74,59 @@ class AnthropicAdapter(LLMPort):
     async def debate(self, messages: List[Message]) -> str:
         mapped = self._map_history(messages)
         return await self._request(messages=mapped, system=self.system_prompt)
-        mapped = self._map_history(messages)
-        return await self._request(messages=mapped, system=self.system_prompt)
+
+    def _topic_gate_system_prompt(self) -> str:
+        # Keep this tiny and strict; output must be a single line.
+        return (
+            'You are a strict topic gate for a debate system. '
+            'Classify if the proposed topic is debate-ready.\n'
+            'Debate-ready: a clear proposition one can argue for/against; not greeting; not gibberish; '
+            'not trivial (≤2 content words).\n'
+            "Valid examples: 'God exists', 'Sports build character', 'Climate change is real'.\n"
+            "Invalid examples: 'hi', 'hello', 'asdf???', '!!!', 'ok'.\n"
+            'Output exactly one line:\n'
+            "- 'VALID'\n"
+            "- or 'INVALID: <short reason>'\n"
+        )
+
+    async def check_topic(self, topic: str, language: str = 'en') -> dict:
+        """
+        Returns:
+            {
+              "is_valid": "true" | "false",
+              "reason": "<short reason or empty>",
+              "raw": "<model raw text>"
+            }
+        """
+        sys = self._topic_gate_system_prompt()
+        user_text = (
+            f'Topic: {topic}\n'
+            f'Language: {language}\n'
+            "Return exactly 'VALID' or 'INVALID: <reason>'."
+        )
+        resp = await self.client.messages.create(
+            model=self.model,
+            system=sys,
+            messages=[
+                {
+                    'role': 'user',
+                    'content': [{'type': 'text', 'text': user_text}],
+                }
+            ],
+            temperature=0.0,  # deterministic
+            max_tokens=8,  # tiny budget
+        )
+        out = ''.join(
+            block.text
+            for block in resp.content
+            if getattr(block, 'type', None) == 'text'
+        ).strip()
+
+        up = out.upper()
+        if up.startswith('VALID'):
+            return {'is_valid': 'true', 'reason': '', 'raw': out}
+        if up.startswith('INVALID'):
+            reason = out.split(':', 1)[1].strip() if ':' in out else ''
+            return {'is_valid': 'false', 'reason': reason, 'raw': out}
+        # Fallback if the model misbehaves
+        return {'is_valid': 'false', 'reason': 'unrecognized', 'raw': out}

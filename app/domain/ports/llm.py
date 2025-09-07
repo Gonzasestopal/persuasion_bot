@@ -21,3 +21,10 @@ class LLMPort(abc.ABC):
         return the assistant's reply as plain text.
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    async def check_topic(self, topic: str) -> str:
+        """
+        Given a topic return if its coherent or not
+        """
+        raise NotImplementedError
