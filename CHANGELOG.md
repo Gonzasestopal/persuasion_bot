@@ -1,3 +1,15 @@
+## v1.8.0 (2025-09-07)
+
+### Feat
+
+- add format for invalid topics
+- check topic before start conversation
+
+### Refactor
+
+- make test pass
+- make test pass
+
 ## v1.7.0 (2025-09-07)
 
 ### Feat
