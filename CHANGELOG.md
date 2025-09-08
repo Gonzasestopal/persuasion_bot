@@ -1,3 +1,14 @@
+## v1.12.0 (2025-09-08)
+
+### Feat
+
+- add telemetry
+- check for similar responses
+
+### Refactor
+
+- move text utils from service
+
 ## v1.11.0 (2025-09-08)
 
 ### Feat
