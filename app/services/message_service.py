@@ -99,11 +99,12 @@ class MessageService(object):
         if state is None:
             raise ConversationNotFound('debate state not found or expired')
 
-        reply = await self.concession_service.analyze_conversation(
+        reply, updated_state = await self.concession_service.analyze_conversation(
             messages=full_history,
             stance=conversation.stance,
             conversation_id=conversation_id,
             topic=conversation.topic,
+            state=state,
         )
 
         # Persist updated state
