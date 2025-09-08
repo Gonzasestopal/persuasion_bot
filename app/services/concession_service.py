@@ -16,55 +16,21 @@ from app.domain.ports.llm import LLMPort
 from app.domain.ports.nli import NLIPort
 from app.nli.ops import agg_max
 from app.utils.text import (
+    ACK_PREFIXES,
+    STANCE_BANNERS,
+    STOP_ALL,
     drop_questions,
+    looks_like_question,
     normalize_spaces,
     round3,
     sanitize_end_markers,
+    strip_trailing_fragment,
     trunc,
     word_count,
 )
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-# ----------------------------- Spanish question helpers -----------------------------
-SPANISH_Q_WORDS = (
-    '¿',
-    'como',
-    'cómo',
-    'que',
-    'qué',
-    'por que',
-    'por qué',
-    'cuando',
-    'cuándo',
-    'donde',
-    'dónde',
-    'cual',
-    'cuál',
-    'cuales',
-    'cuáles',
-    'quien',
-    'quién',
-    'quienes',
-    'quiénes',
-)
-
-
-def _looks_like_question(s: str) -> bool:
-    s2 = (s or '').strip().lower()
-    if not s2:
-        return False
-    return s2.startswith('¿') or any(s2.startswith(w + ' ') for w in SPANISH_Q_WORDS)
-
-
-def _ends_with_strong_punct(s: str) -> bool:
-    return s.endswith(('.', '!', '?', '…'))
-
-
-def _strip_trailing_fragment(parts: List[str]) -> List[str]:
-    # if the original text doesn't end with strong punctuation, drop last fragment (often a cut question)
-    return parts[:-1] if parts and not _ends_with_strong_punct(parts[-1]) else parts
 
 
 class ConcessionService:
@@ -78,28 +44,6 @@ class ConcessionService:
     """
 
     # Exclude soft-ack sentences from claim extraction
-    ACK_PREFIXES = (
-        'thanks',
-        'thank you',
-        'i appreciate',
-        'good point',
-        'fair point',
-        'i see',
-        'understand',
-    )
-
-    # Exclude stance/meta banners from claim extraction
-    STANCE_BANNERS = (
-        'i will gladly take the pro stance',
-        'i will gladly take the con stance',
-        'i will defend the proposition as stated',
-        'defenderé la proposición tal como está',
-        'defenderei a proposição como está',
-        'tomaré el lado pro',
-        'tomaré el lado con',
-        'tomarei o lado pro',
-        'tomarei o lado con',
-    )
 
     def __init__(
         self,
@@ -262,7 +206,7 @@ class ConcessionService:
             logger.debug(
                 '[end] ENDED this reply | reason=%s | positives=%d/%d | turns(projected)=%d/%d',
                 state.end_reason,
-                state.positive_judgements,
+                state.policy.required_positive_judgements,
                 state.policy.required_positive_judgements,
                 state.assistant_turns + 1,
                 state.policy.max_assistant_turns,
@@ -441,6 +385,8 @@ class ConcessionService:
             progress={
                 'positive_judgements': state.positive_judgements,
                 'assistant_turns': state.assistant_turns,
+                # Optional: expose novelty in payload for telemetry/LLM awareness
+                # 'novelty': float(self._latest_user_novelty(conversation, user_idx)) if user_idx is not None else 1.0,
             },
         )
         return payload, user_txt, bot_txt
@@ -484,20 +430,20 @@ class ConcessionService:
         raw_parts = [
             p.strip() for p in re.split(r'(?<=[.!?…])\s+', bot_txt) if p.strip()
         ]
-        parts = _strip_trailing_fragment(raw_parts)
+        parts = strip_trailing_fragment(raw_parts)
 
         claims: List[str] = []
         skipped_banners = 0
         for s in parts:
-            if s.endswith('?') or _looks_like_question(s):
+            if s.endswith('?') or looks_like_question(s):
                 continue
             s2 = drop_questions(s).strip()
             if not s2:
                 continue
             s2_l = s2.lower()
-            if any(s2_l.startswith(prefix) for prefix in self.ACK_PREFIXES):
+            if any(s2_l.startswith(prefix) for prefix in ACK_PREFIXES):
                 continue
-            if any(b in s2_l for b in self.STANCE_BANNERS):
+            if any(b in s2_l for b in STANCE_BANNERS):
                 skipped_banners += 1
                 continue
             if not s2.endswith(('.', '!')):
