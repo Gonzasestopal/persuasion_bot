@@ -1,39 +1,56 @@
+from typing import Any, Dict, List
+
 import pytest
 
 from app.adapters.repositories.memory_debate_store import InMemoryDebateStore
+from app.domain.enums import Stance
+from app.domain.nli.config import NLIConfig
 from app.domain.nli.scoring import ScoringConfig
-from app.domain.ports.llm import (
-    LLMPort,
-)  # only for typing; any object with .debate(...) works
-from app.services.concession_service import ConcessionService, NLIConfig, Stance
+from app.services.concession_service import ConcessionService
 
 pytestmark = pytest.mark.unit
 
 
 # ---------------------------- Fakes / Helpers ------------------------------
+
+
 @pytest.fixture
 def store():
     return InMemoryDebateStore()
 
 
-class FakeLLM(LLMPort):
-    async def debate(self, messages):
+class FakeLLM:
+    """
+    Minimal LLM stub:
+      - debate(...) returns a static reply (service calls it after judging)
+      - nli_judge(payload=...) returns a configured decision dict
+    """
+
+    def __init__(self, decision: Dict[str, Any] | None = None):
+        # Default: concession with high confidence
+        self.decision = decision or {
+            'verdict': 'OPPOSITE',
+            'concession': True,
+            'confidence': 0.87,
+            'reason': 'thesis_opposition_strong',
+        }
+        self.last_payload: Dict[str, Any] | None = None
+
+    async def debate(self, messages, state=None):
         return 'fake-llm-reply'
 
-    async def generate(self):
-        return 'i would glady'
-
-    async def check_topic(self, topic):
-        return True
+    async def nli_judge(self, *, payload: Dict[str, Any]):
+        self.last_payload = payload  # capture for assertions
+        return self.decision
 
 
 def mk_dir(ent: float, neu: float, contra: float):
-    # one direction scores
+    # single direction scores
     return {'entailment': ent, 'neutral': neu, 'contradiction': contra}
 
 
 def mk_bidir(ph, hp):
-    # build bidirectional package + agg_max
+    # bidirectional package; service will agg with agg_max
     agg = {
         k: max(ph.get(k, 0.0), hp.get(k, 0.0))
         for k in ('entailment', 'neutral', 'contradiction')
@@ -43,9 +60,9 @@ def mk_bidir(ph, hp):
 
 class FakeNLI:
     """
-    Devuelve una secuencia preprogramada y, si se agota, reutiliza el último
-    paquete (repeat_last=True). Opcionalmente, puede devolver una lista
-    específica por oración (per_sentence) que consumirá primero.
+    Returns scripted bidirectional scores in sequence for each call to bidirectional_scores.
+    If 'per_sentence' is provided, those are consumed first (for sentence scan).
+    After sequence exhausted, repeats the last package if repeat_last=True.
     """
 
     def __init__(self, sequence, repeat_last=True, per_sentence=None):
@@ -56,7 +73,6 @@ class FakeNLI:
         self._last_pkg = None
 
     def bidirectional_scores(self, premise, hypothesis):
-        # Si hay paquetes por oración, consúmelos primero (útil para _max_contra_sentence)
         if self.per_sentence is not None and self._ps_idx < len(self.per_sentence):
             pkg = self.per_sentence[self._ps_idx]
             self._ps_idx += 1
@@ -92,14 +108,13 @@ def make_msgs():
             self.role = role
             self.message = message
 
-    # assistant message must have >= 10 words (alphabetic) to be “valid”
     bot = Msg(
         'bot',
-        'Presento mi argumento principal. Considera la evidencia empírica disponible y los efectos observados.',
+        'The assistant presents a clear argument with solid evidence and several complete sentences to satisfy length.',
     )
     user = Msg(
         'user',
-        'Aquí va la respuesta extensa del usuario que contiene más de treinta palabras para pasar la verificación de longitud.',
+        'Here is the user’s sufficiently long reply that easily passes any length threshold used by the service.',
     )
     return [bot, user]
 
@@ -107,454 +122,234 @@ def make_msgs():
 # ------------------------------- Tests -------------------------------------
 
 
-def test_thesis_contradiction_triggers_concession():
-    # pair: neutral, thesis: contradiction (strong)
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
-    )
-    thesis_contra = mk_bidir(
-        mk_dir(0.10, 0.75, 0.80),
-        mk_dir(0.10, 0.70, 0.82),
-    )
-    nli = FakeNLI([pair_neutral, thesis_contra])
-    svc = ConcessionService(
-        llm=FakeLLM(), nli=nli, nli_config=NLIConfig(), scoring=ScoringConfig()
-    )
-    conv = [
-        {
-            'role': 'assistant',
-            'content': (
-                'el asistente presenta un argumento claro con evidencia solida y varias '
-                'oraciones completas para validar adecuadamente la longitud requerida'
-            ),
-        },
-        {
-            'role': 'user',
-            'content': (
-                'respuesta del usuario con suficiente longitud para validar el fallback y '
-                'probar el camino de contradiccion de la tesis'
-            ),
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
-    )
-    assert out['concession'] is True
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['reason'] == 'thesis_opposition_soft'
-
-
-def test_thesis_support_same_no_concession():
-    # pair: neutral, thesis: support via h→p (arguments imply claim)
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
-    )
-    thesis_support = mk_bidir(
-        mk_dir(0.20, 0.65, 0.15),
-        mk_dir(0.82, 0.50, 0.10),
-    )
-    nli = FakeNLI([pair_neutral, thesis_support])
-    svc = ConcessionService(
-        llm=FakeLLM(), nli=nli, nli_config=NLIConfig(), scoring=ScoringConfig()
-    )
-    conv = [
-        {
-            'role': 'assistant',
-            'content': (
-                'el asistente presenta un argumento claro con evidencia solida y varias '
-                'oraciones completas para validar adecuadamente la longitud requerida'
-            ),
-        },
-        {
-            'role': 'user',
-            'content': (
-                'respuesta del usuario con suficiente longitud para validar el fallback y '
-                'probar el camino de contradiccion de la tesis'
-            ),
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='Los perros son los mejores amigos del ser humano'
-    )
-    assert out['alignment'] == 'SAME'
-    assert out['concession'] is False  # support does NOT count
-
-
-def test_pairwise_contradiction_fallback():
-    # thesis: neutral, pair: contradiction strong → fallback triggers concession
-    pair_contra = mk_bidir(
-        mk_dir(0.10, 0.20, 0.78),
-        mk_dir(0.12, 0.18, 0.80),
-    )
-    thesis_neutral = mk_bidir(
-        mk_dir(0.20, 0.70, 0.10),
-        mk_dir(0.22, 0.68, 0.10),
-    )
-    nli = FakeNLI(
-        [pair_contra, thesis_neutral]
-    )  # note: pair is computed first in service
-    svc = ConcessionService(
-        llm=FakeLLM(), nli=nli, nli_config=NLIConfig(), scoring=ScoringConfig()
-    )
-    # ensure user has >= 30 chars/words; our service checks length >= 30 for fallback
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'el asistente escribe un texto suficientemente largo con más de diez palabras válidas en total.',
-        },
-        {
-            'role': 'user',
-            'content': 'este es un texto de usuario bastante largo que supera con facilidad el umbral de longitud exigido por el servicio.',
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.CON, topic='Las redes sociales han mejorado la conexión humana'
-    )
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['reason'] == 'pairwise_opposition_soft'
-    assert out['concession'] is True
-
-
-def test_underdetermined_no_concession():
-    # both neutral → unknown
-    pair_neutral = mk_bidir(
-        mk_dir(0.20, 0.70, 0.10),
-        mk_dir(0.22, 0.68, 0.10),
-    )
-    thesis_neutral = mk_bidir(
-        mk_dir(0.25, 0.65, 0.10),
-        mk_dir(0.24, 0.66, 0.10),
-    )
-    nli = FakeNLI([pair_neutral, thesis_neutral])
-    svc = ConcessionService(
-        llm=FakeLLM(), nli=nli, nli_config=NLIConfig(), scoring=ScoringConfig()
-    )
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'texto del asistente con varias oraciones para cumplir el mínimo de palabras requerido.',
-        },
-        {
-            'role': 'user',
-            'content': 'texto del usuario sin posicionamiento claro ni relación directa con la tesis.',
-        },
-    ]
-
-    out = svc.judge_last_two_messages(conv, Stance.PRO, topic='Tema cualquiera')
-    assert out['alignment'] == 'UNKNOWN'
-    assert out['concession'] is False
-
-
 @pytest.mark.asyncio
-async def test_analyze_conversation_increments_on_contradiction_and_concludes(
-    monkeypatch, store
-):
-    # Make state conclude after first concession
-    nli = FakeNLI(
-        [
-            # pair neutral, thesis contradiction strong
-            mk_bidir(mk_dir(0.10, 0.82, 0.08), mk_dir(0.12, 0.80, 0.08)),
-            mk_bidir(mk_dir(0.10, 0.75, 0.80), mk_dir(0.10, 0.70, 0.82)),
-        ]
+async def test_analyze_conversation_concession_and_conclude(store):
+    """
+    LLM judge returns a concession with high confidence:
+    - service increments positive_judgements
+    - state concludes (DummyState.maybe_conclude)
+    - analyze_conversation returns verdict string (build_verdict path)
+    """
+    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.2, 0.6, 0.2), mk_dir(0.2, 0.6, 0.2))])
+    llm = FakeLLM(
+        decision={
+            'verdict': 'OPPOSITE',
+            'concession': True,
+            'confidence': 0.9,
+            'reason': 'thesis_opposition_strong',
+        }
     )
     svc = ConcessionService(
-        llm=FakeLLM(),
+        llm=llm,
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
         debate_store=store,
     )
 
-    # Inject dummy state that concludes after one positive judgement
     conv_id = 42
-    svc.debate_store.save(conv_id, DummyState())
-
+    store.save(conv_id, DummyState())
     msgs = make_msgs()
-    # The service expects Message objects with .role and .message;
-    # our make_msgs returns a simple class that matches that.
-    result = await svc.analyze_conversation(
-        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic='Tema X'
+
+    out = await svc.analyze_conversation(
+        messages=msgs,
+        stance=Stance.PRO,
+        conversation_id=conv_id,
+        topic='Remote work is more productive',
     )
 
-    # Since maybe_conclude() returns True after first concession, analyze_conversation returns verdict string
-    assert isinstance(result, str)
-    assert svc.debate_store.get(conv_id).positive_judgements == 1
+    # Concluded → returns verdict string
+    assert isinstance(out, str)
+    assert store.get(conv_id).positive_judgements == 1
+    # Payload sanity
+    assert llm.last_payload is not None
+    assert llm.last_payload['topic'] == 'Remote work is more productive'
+    assert llm.last_payload['stance'] == 'pro'
+    assert isinstance(llm.last_payload['thesis_scores'], dict)
 
 
-def test_short_user_blocks_concession_on_thesis_contradiction():
+@pytest.mark.asyncio
+async def test_analyze_conversation_no_concession_high_confidence(store):
     """
-    Usuario muy corto → NO conceder, aunque la tesis sea contradicha,
-    siempre que la contradicción NO alcance strict_contra_threshold.
+    LLM judge returns SAME / no concession with high confidence:
+    - service SHOULD NOT increment positive_judgements
+    - service proceeds to generate a reply (not concluding)
     """
-    # pair neutral
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
+    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.3, 0.5, 0.2), mk_dir(0.35, 0.45, 0.2))])
+    llm = FakeLLM(
+        decision={
+            'verdict': 'SAME',
+            'concession': False,
+            'confidence': 0.88,
+            'reason': 'thesis_support',
+        }
     )
-    # tesis contradicción fuerte pero < 0.90 (p. ej. 0.85)
-    thesis_contra = mk_bidir(
-        mk_dir(0.10, 0.10, 0.85),
-        mk_dir(0.10, 0.15, 0.83),
+    svc = ConcessionService(
+        llm=llm,
+        nli=nli,
+        nli_config=NLIConfig(),
+        scoring=ScoringConfig(),
+        debate_store=store,
     )
 
-    nli = FakeNLI([pair_neutral, thesis_contra])
-    cfg = ScoringConfig(min_user_words=8, strict_contra_threshold=0.90)
-    svc = ConcessionService(llm=FakeLLM(), nli=nli, scoring=cfg)
+    conv_id = 7
+    store.save(conv_id, DummyState())
+    msgs = make_msgs()
 
-    conv = [
-        # Asistente válido (≥10 palabras alfabéticas)
-        {
-            'role': 'assistant',
-            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
-        },
-        # Usuario MUY corto (menos de 8 palabras)
-        {'role': 'user', 'content': 'no estoy de acuerdo'},
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
+    out = await svc.analyze_conversation(
+        messages=msgs,
+        stance=Stance.CON,
+        conversation_id=conv_id,
+        topic='Dogs are the best companions',
     )
-    assert out['concession'] is False
-    assert out['reason'] == 'too_short'
-    assert (
-        out['alignment'] == 'UNKNOWN'
-    )  # la rama too_short deja el alineamiento como UNKNOWN
+
+    assert isinstance(out, str)  # reply path
+    assert store.get(conv_id).positive_judgements == 0
+    assert llm.last_payload is not None
+    assert llm.last_payload['stance'] == 'con'
 
 
-def test_strong_thesis_contradiction_overrides_min_words():
+@pytest.mark.asyncio
+async def test_analyze_conversation_concession_low_confidence_gate(store):
     """
-    Contradicción “extra fuerte” de la tesis (≥ strict_contra_threshold) → concede,
-    incluso si el usuario es breve.
+    LLM judge returns concession but with low confidence:
+    - service should *not* increment positive_judgements because of min confidence gate
     """
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
+    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.1, 0.8, 0.1), mk_dir(0.1, 0.8, 0.1))])
+    llm = FakeLLM(
+        decision={
+            'verdict': 'OPPOSITE',
+            'concession': True,
+            'confidence': 0.25,  # below default min_conf=0.70
+            'reason': 'weak_signal',
+        }
     )
-    # tesis contradicción ≥ 0.90
-    thesis_contra_strong = mk_bidir(
-        mk_dir(0.05, 0.05, 0.93),
-        mk_dir(0.06, 0.07, 0.92),
+    svc = ConcessionService(
+        llm=llm,
+        nli=nli,
+        nli_config=NLIConfig(),
+        scoring=ScoringConfig(),
+        debate_store=store,
+        llm_judge_min_confidence=0.70,
     )
 
-    nli = FakeNLI([pair_neutral, thesis_contra_strong])
-    cfg = ScoringConfig(min_user_words=8, strict_contra_threshold=0.90)
-    svc = ConcessionService(llm=FakeLLM(), nli=nli, scoring=cfg)
+    conv_id = 9
+    store.save(conv_id, DummyState())
+    msgs = make_msgs()
 
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
-        },
-        {'role': 'user', 'content': 'no'},
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.CON, topic='Las redes sociales han mejorado la conexión humana'
+    out = await svc.analyze_conversation(
+        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic='X'
     )
-    assert out['concession'] is True
-    assert out['reason'] == 'thesis_opposition_soft'
-    assert out['alignment'] == 'OPPOSITE'
+
+    assert isinstance(out, str)
+    assert store.get(conv_id).positive_judgements == 0  # gated
 
 
-def test_short_user_blocks_pairwise_fallback():
+def test_payload_builder_sentence_scan_and_on_topic_flags():
     """
-    Si la tesis es neutral pero hay contradicción por pares,
-    el fallback NO debe activar concesión cuando el usuario es corto.
+    Validate that the payload builder computes:
+      - thesis_agg
+      - max_sent_contra from sentence scanning
+      - on_topic heuristic
+      - pair_best aggregation (from best contradicting claim)
     """
-    # pair contradicción fuerte
-    pair_contra = mk_bidir(
-        mk_dir(0.10, 0.20, 0.78),
-        mk_dir(0.12, 0.18, 0.80),
-    )
-    # tesis neutral
-    thesis_neutral = mk_bidir(
-        mk_dir(0.25, 0.65, 0.10),
-        mk_dir(0.24, 0.66, 0.10),
-    )
-
-    nli = FakeNLI(
-        [pair_contra, thesis_neutral]
-    )  # pair se evalúa primero en el servicio
-    cfg = ScoringConfig(min_user_words=8, strict_contra_threshold=0.90)
-    svc = ConcessionService(llm=FakeLLM(), nli=nli, scoring=cfg)
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
-        },
-        {'role': 'user', 'content': 'eso no'},
-    ]
-
-    out = svc.judge_last_two_messages(conv, Stance.PRO, topic='Tema cualquiera')
-    assert out['concession'] is False
-    assert out['reason'] == 'too_short'
-    assert out['alignment'] == 'UNKNOWN'
-
-
-def test_off_topic_blocks_pairwise_concession_even_if_pair_contradiction():
-    """
-    Si la relación con la TESIS es off-topic (muy neutral en ambas direcciones),
-    el fallback por pares NO debe conceder, aunque haya contradicción fuerte pairwise.
-    """
-    # pair: contradicción fuerte (para forzar el fallback si fuera on-topic)
-    pair_contra = mk_bidir(
-        mk_dir(0.02, 0.18, 0.80),
-        mk_dir(0.02, 0.16, 0.82),
-    )
-
-    # tesis: off-topic → muy neutral en ambas direcciones y sin señal (ent/contra bajos)
-    # TOPIC_NEU_MAX = 0.75 y TOPIC_SIGNAL_MIN = 0.30 en el servicio
-    thesis_offtopic = mk_bidir(
-        mk_dir(0.04, 0.92, 0.04),
-        mk_dir(0.05, 0.90, 0.05),
-    )
-
-    nli = FakeNLI([pair_contra, thesis_offtopic])
-    svc = ConcessionService(llm=FakeLLM(), nli=nli)
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'el asistente presenta un argumento claro con evidencia solida y varias oraciones completas',
-        },
-        {
-            'role': 'user',
-            # suficiente longitud para no activar 'too_short'
-            'content': 'hablo sobre recetas de cocina y especias aromaticas nada que ver con productividad laboral remota',
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='El trabajo remoto es más productivo'
-    )
-    assert out['concession'] is False
-    assert out['alignment'] == 'UNKNOWN'
-    assert out['reason'] == 'off_topic'
-
-
-def test_multilingual_thesis_contradiction_spanish_user():
-    """
-    Thesis in EN, user reply in ES. Service should still mark contradiction
-    (we script NLI to return strong thesis-contradiction).
-    """
-    # pair: neutral (won't matter)
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
-    )
-    # thesis: strong contradiction (agg contradiction >= 0.80)
-    thesis_contra = mk_bidir(
-        mk_dir(0.10, 0.10, 0.82),  # p→h
-        mk_dir(0.10, 0.12, 0.85),  # h→p
-    )
-
-    nli = FakeNLI([pair_neutral, thesis_contra])
-    svc = ConcessionService(llm=FakeLLM(), nli=nli)
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'the assistant presents a clear argument with solid evidence and several complete sentences to validate length',
-        },
-        {
-            'role': 'user',
-            # Spanish, clearly opposing the English thesis; long enough to pass length checks
-            'content': (
-                'No es cierto que el trabajo remoto sea más productivo que el trabajo en oficina; '
-                'las distracciones domésticas y la falta de supervisión reducen el rendimiento.'
-            ),
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='Remote work is more productive than office work'
-    )
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['concession'] is True
-    assert out['reason'] == 'thesis_opposition_soft'
-
-
-def test_multilingual_thesis_contradiction_english_user():
-    pair_neutral = mk_bidir(
-        mk_dir(0.10, 0.82, 0.08),
-        mk_dir(0.12, 0.80, 0.08),
-    )
-    thesis_contra = mk_bidir(
-        mk_dir(0.10, 0.11, 0.83),
-        mk_dir(0.10, 0.12, 0.86),
-    )
-    nli = FakeNLI([pair_neutral, thesis_contra])
-    svc = ConcessionService(llm=FakeLLM(), nli=nli)
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'el asistente presenta un argumento claro con evidencia y varias oraciones completas para validar la longitud requerida',
-        },
-        {
-            'role': 'user',
-            'content': (
-                'It is not true that social media has improved human connection; '
-                'it encourages superficial interactions and weakens trust.'
-            ),
-        },
-    ]
-
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='Las redes sociales han mejorado la conexión humana'
-    )
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['concession'] is True
-    assert out['reason'] == 'thesis_opposition_soft'
-
-
-def test_sentence_splitting_and_max_contra():
-    """
-    Ensure that text is split into individual sentences and the strongest
-    contradiction is detected even if only one sentence is clearly opposing.
-    """
-    # First sentence: neutral
+    # First sentence neutral; second sentence strongly contradictory
     sent1 = mk_dir(0.20, 0.70, 0.10)
-    # Second sentence: strong contradiction
     sent2 = mk_dir(0.10, 0.05, 0.85)
 
-    # Pack into bidirectional fake results for each sentence
-    # We'll have FakeNLI pop these in order of calls
     thesis_neutral = mk_bidir(sent1, sent1)
     thesis_contra = mk_bidir(sent2, sent2)
 
-    nli = FakeNLI([thesis_neutral, thesis_contra])
-    svc = ConcessionService(llm=FakeLLM(), nli=nli)
+    # FakeNLI will first be used to compute thesis-level scores (once), and also in sentence scan
+    # Here we want the sentence scan to hit both, resulting in max_sent_contra≈0.85
+    nli = FakeNLI(
+        sequence=[thesis_neutral], per_sentence=[thesis_neutral, thesis_contra]
+    )
+
+    svc = ConcessionService(
+        llm=FakeLLM(),
+        nli=nli,
+        nli_config=NLIConfig(),
+        scoring=ScoringConfig(),
+        debate_store=InMemoryDebateStore(),
+    )
 
     conv = [
         {
             'role': 'assistant',
-            'content': 'The assistant gives a long claim with evidence and examples to ensure word count.',
+            'content': 'Assistant long message with multiple sentences to meet min words.',
         },
         {
             'role': 'user',
-            'content': (
-                'Primera oración es neutral y no contradice de manera explícita. '
-                'Sin embargo, no es cierto que el universo requiera un creador; '
-                'las leyes físicas pueden surgir naturalmente.'
-            ),
+            'content': 'Primera oración neutral. Sin embargo, esto contradice claramente la tesis.',
         },
     ]
 
-    out = svc.judge_last_two_messages(
-        conv, Stance.PRO, topic='The universe requires a creator'
+    payload, user_txt, bot_txt = svc._build_llm_judge_payload(
+        conversation=conv,
+        stance=Stance.PRO,
+        topic='El universo requiere un creador',
     )
-    # Because the second sentence is strongly contradictory, service should catch it
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['concession'] is True
-    assert out['reason'] == 'thesis_opposition_soft'
-    # Because the second sentence is strongly contradictory, service should catch it
-    assert out['alignment'] == 'OPPOSITE'
-    assert out['concession'] is True
-    assert out['reason'] == 'thesis_opposition_soft'
+
+    assert payload is not None
+    d = payload.to_dict()
+    assert d['topic'] == 'El universo requiere un creador'
+    assert d['stance'] == 'pro'
+    assert 0.0 <= d['thesis_scores']['entailment'] <= 1.0
+    assert 0.80 <= d['max_sent_contra'] <= 0.90  # catches the strong second sentence
+    assert isinstance(d['pair_best'], dict)
+    assert 'user_wc' in d
+    assert isinstance(user_txt, str) and isinstance(bot_txt, str)
+
+
+def test_payload_builder_pair_best_from_claims():
+    """
+    Ensure pair_best aggregates from the most contradictory assistant claim.
+    """
+    # Pairwise scoring sequence: first claim neutral, second claim contradicts
+    pair_neutral = mk_bidir(mk_dir(0.20, 0.70, 0.10), mk_dir(0.22, 0.68, 0.10))
+    pair_contra = mk_bidir(mk_dir(0.10, 0.25, 0.72), mk_dir(0.12, 0.22, 0.75))
+
+    # Thesis agg (not important here)
+    thesis_any = mk_bidir(mk_dir(0.30, 0.60, 0.10), mk_dir(0.32, 0.58, 0.10))
+    nli = FakeNLI(sequence=[thesis_any])
+    nli.per_sentence = None  # claims path doesn't use per_sentence
+
+    svc = ConcessionService(
+        llm=FakeLLM(),
+        nli=nli,
+        nli_config=NLIConfig(),
+        scoring=ScoringConfig(),
+        debate_store=InMemoryDebateStore(),
+    )
+
+    conv = [
+        {
+            'role': 'assistant',
+            'content': 'First claim is tentative. Second claim clearly rejects the thesis.',
+        },
+        {
+            'role': 'user',
+            'content': 'Long enough user text to consider claims and compute pairwise scores.',
+        },
+    ]
+
+    # Monkeypatch _claim_scores to use our two scripted packages
+    def fake_claim_scores(claims: List[str], user_clean: str):
+        # Return tuples like (claim, ent, contra, rel, bidir_scores)
+        return [
+            (claims[0], 0.30, 0.10, 0.30, pair_neutral),
+            (claims[1], 0.20, 0.75, 0.75, pair_contra),  # most contradictory
+        ]
+
+    svc._claim_scores = fake_claim_scores  # type: ignore
+
+    payload, _, _ = svc._build_llm_judge_payload(
+        conversation=conv,
+        stance=Stance.CON,
+        topic='Thesis T',
+    )
+    assert payload is not None
+    d = payload.to_dict()
+    assert 0.70 <= d['pair_best']['contradiction'] <= 0.80  # came from second claim
+    assert d['stance'] == 'con'
