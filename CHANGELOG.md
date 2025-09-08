@@ -1,3 +1,13 @@
+## v1.9.0 (2025-09-07)
+
+### Feat
+
+- add normalizer in check topic
+
+### Refactor
+
+- make normalizer include clean topic
+
 ## v1.8.0 (2025-09-07)
 
 ### Feat
