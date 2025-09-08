@@ -7,6 +7,8 @@ _ALLOWED = {'pro', 'con'}
 
 TOPIC_MAX_LENGTH = 100
 
+MESSAGE_MAX_LENGTH = 160  # para continuaciones u otras validaciones
+
 
 _TOPIC_RE = re.compile(r'(?i)\btopic\s*:\s*(?P<topic>.+?)(?=,?\s*\bside\b|$)')
 _SIDE_RE = re.compile(r'(?i)\bside\s*:\s*(?P<side>\w+)')
@@ -44,7 +46,10 @@ def parse_topic_side(text: str) -> Tuple[str, str]:
 def assert_no_topic_or_side_markers(text: str) -> None:
     if not text or not text.strip():
         raise InvalidContinuationMessage('message must not be empty.')
+    if len(text) > MESSAGE_MAX_LENGTH:
+        raise InvalidContinuationMessage('message must be less than 120 characters')
     if _MARKERS_RE.search(text):
         raise InvalidContinuationMessage(
             'topic/side must not be provided when continuing a conversation'
         )
+    return True
