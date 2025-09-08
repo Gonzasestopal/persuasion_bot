@@ -10,6 +10,7 @@ class JudgeReason(str, Enum):
     OFF_TOPIC = 'off_topic'
     POLICY_TURN_LIMIT = 'policy_turn_limit'
     POSITIVE_JUDGEMENTS_REACHED = 'positive_judgements_reached'
+    STRONG_CONTRADICTION_EVIDENCE = 'strong_contradiction_evidence'
 
 
 ALLOWED_REASONS = {r.value for r in JudgeReason}

@@ -1,10 +1,12 @@
 # app/services/concession_service.py
 import logging
 import re
+import string
 from dataclasses import asdict
 from typing import Dict, List, Optional, Tuple
 
 from app.domain.enums import Stance
+from app.domain.mappings import END_REASON_MAP
 from app.domain.models import Message
 from app.domain.nli.config import NLIConfig
 from app.domain.nli.judge_payload import NLIJudgePayload
@@ -24,6 +26,45 @@ from app.utils.text import (
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+# ----------------------------- Spanish question helpers -----------------------------
+SPANISH_Q_WORDS = (
+    '¿',
+    'como',
+    'cómo',
+    'que',
+    'qué',
+    'por que',
+    'por qué',
+    'cuando',
+    'cuándo',
+    'donde',
+    'dónde',
+    'cual',
+    'cuál',
+    'cuales',
+    'cuáles',
+    'quien',
+    'quién',
+    'quienes',
+    'quiénes',
+)
+
+
+def _looks_like_question(s: str) -> bool:
+    s2 = (s or '').strip().lower()
+    if not s2:
+        return False
+    return s2.startswith('¿') or any(s2.startswith(w + ' ') for w in SPANISH_Q_WORDS)
+
+
+def _ends_with_strong_punct(s: str) -> bool:
+    return s.endswith(('.', '!', '?', '…'))
+
+
+def _strip_trailing_fragment(parts: List[str]) -> List[str]:
+    # if the original text doesn't end with strong punctuation, drop last fragment (often a cut question)
+    return parts[:-1] if parts and not _ends_with_strong_punct(parts[-1]) else parts
 
 
 class ConcessionService:
@@ -80,13 +121,12 @@ class ConcessionService:
         self.llm_judge_min_confidence = float(llm_judge_min_confidence)
 
     # ----------------------------- public API -----------------------------
-
     async def analyze_conversation(
         self,
         messages: List[Message],
-        stance: Stance,  # kept for compatibility; state.stance is authoritative
+        stance: Stance,
         conversation_id: int,
-        topic: str,  # kept for compatibility; state.topic is authoritative
+        topic: str,
     ) -> str:
         state = self.debate_store.get(conversation_id)
         if state is None:
@@ -94,7 +134,7 @@ class ConcessionService:
                 f'DebateState missing for conversation_id={conversation_id}'
             )
 
-        # ---- Hard-sync assistant turns from transcript to avoid drift ----
+        # sync assistant turns from transcript to avoid drift
         turns_in_transcript = self._count_assistant_turns(messages)
         if state.assistant_turns != turns_in_transcript:
             logger.debug(
@@ -105,7 +145,6 @@ class ConcessionService:
             state.assistant_turns = turns_in_transcript
 
         topic_clean: str = state.topic
-
         logger.debug(
             '[analyze] conv_id=%s stance=%s topic=%s | turns=%d msgs=%d',
             conversation_id,
@@ -115,7 +154,7 @@ class ConcessionService:
             len(messages),
         )
 
-        # If already ended, render via end-only LLM path
+        # If already ended, render via end-only path
         if state.match_concluded:
             logger.debug('[analyze] already ENDED → debate_aware_end render')
             reply_ended = await self._render_end_via_llm(messages, state)
@@ -124,10 +163,10 @@ class ConcessionService:
         mapped = self._map_history(messages)
         logger.debug('[analyze] mapped_history=%d', len(mapped))
 
-        # ---- Build evidence and call LLM judge (scores only) ----
+        # judge payload
         payload, user_txt, bot_txt = self._build_llm_judge_payload(
             conversation=mapped,
-            stance=state.stance,  # use server-authoritative stance
+            stance=state.stance,
             topic=topic_clean,
             state=state,
         )
@@ -141,14 +180,14 @@ class ConcessionService:
                 )
                 decision = await self.judge.nli_judge(payload=payload_dict)
 
-                # Store raw judge outputs (no mapping)
+                # store judge outputs
                 state.set_judge(
                     accept=decision.accept,
                     reason=decision.reason,
                     confidence=decision.confidence,
                 )
 
-                # Confidence-gated tally
+                # confidence-gated tally
                 if (
                     decision.accept
                     and decision.confidence >= self.llm_judge_min_confidence
@@ -181,7 +220,7 @@ class ConcessionService:
         else:
             logger.debug('[judge] skipped: insufficient context for payload')
 
-        # ---- End policy check projected on THIS reply (before rendering) ----
+        # end policy (projected on THIS reply)
         will_hit_cap_now = (
             state.assistant_turns + 1
         ) >= state.policy.max_assistant_turns
@@ -205,22 +244,16 @@ class ConcessionService:
                 state.assistant_turns + 1,
                 state.policy.max_assistant_turns,
             )
-            # Persist so the LLM sees DEBATE_STATUS=ENDED
             self.debate_store.save(conversation_id=conversation_id, state=state)
 
-        # ---- Render via LLM (normal vs end-only) ----
+        # render
         if state.match_concluded:
             reply = await self._render_end_via_llm(messages, state)
         else:
-            # Normal debate turn
-            reply = await self.llm.debate_aware(
-                messages=messages,
-                state=state,
-            )
+            reply = await self.llm.debate_aware(messages=messages, state=state)
 
         reply = sanitize_end_markers(reply).strip()
 
-        # Advance turn count only if not ended this turn
         if not state.match_concluded:
             state.assistant_turns = turns_in_transcript + 1
 
@@ -233,47 +266,56 @@ class ConcessionService:
         return reply
 
     # ----------------------------- LLM end rendering -----------------------------
-
     async def _render_end_via_llm(self, messages: List[Message], state) -> str:
         """
         Ask the model to render the end message itself (no server-side override).
         Falls back to debate_aware if debate_aware_end isn't implemented.
         """
         prompt_vars = self._end_prompt_vars(state)
-        # Prefer a deterministic, short generation in end mode.
         try:
             logger.debug('[render_end] using debate_aware_end | vars=%s', prompt_vars)
             return await self.llm.debate_aware_end(
                 messages=messages,
                 prompt_vars=prompt_vars,
+                temperature=0.2,
+                max_tokens=80,
+                stop=None,
             )
         except AttributeError:
-            # Back-compat: if adapter hasn’t implemented debate_aware_end, use the regular path.
             logger.debug(
                 '[render_end] debate_aware_end unavailable; falling back to debate_aware'
             )
             return await self.llm.debate_aware(
                 messages=messages,
                 state=state,
+                temperature=0.2,
+                max_tokens=80,
+                stop=None,
             )
 
     @staticmethod
     def _end_prompt_vars(state) -> Dict[str, str]:
-        # Build a clean variables dict for an end-only system prompt.
+        """
+        Build variables for END_SYSTEM_PROMPT using a single-language map
+        (no locale branching). Falls back gracefully.
+        """
+        reason_label = state.last_judge_reason_label or 'unspecified_reason'
         end_reason = (
-            state.end_reason or state.last_judge_reason_label or 'Debate concluded'
+            END_REASON_MAP.get(reason_label)
+            or state.end_reason
+            or reason_label.replace('_', ' ')
         )
+
         return {
-            'LANGUAGE': state.lang,
+            'LANGUAGE': (state.lang or 'en').lower(),
             'TOPIC': state.topic,
             'DEBATE_STATUS': 'ENDED',
             'END_REASON': end_reason,
-            'JUDGE_REASON_LABEL': state.last_judge_reason_label or 'unspecified_reason',
+            'JUDGE_REASON_LABEL': reason_label,
             'JUDGE_CONFIDENCE': f'{state.last_judge_confidence:.2f}',
         }
 
     # ----------------------------- LLM Judge payload builder -----------------------------
-
     def _build_llm_judge_payload(
         self,
         *,
@@ -282,10 +324,6 @@ class ConcessionService:
         topic: str,
         state,
     ) -> Tuple[Optional[NLIJudgePayload], str, str]:
-        """
-        Build the evidence payload expected by the score-only LLM Judge.
-        Returns: (payload_or_None, user_text, bot_text)
-        """
         if not conversation:
             logger.debug('[payload] empty conversation')
             return None, '', ''
@@ -295,9 +333,8 @@ class ConcessionService:
             logger.debug('[payload] no user message found')
             return None, '', ''
 
-        # Robust fallback to avoid silent judge-skip
+        # min assistant words to pick a bot turn
         min_asst_words = getattr(self.scoring, 'min_assistant_words', 8)
-
         bot_idx = self._last_index(
             conversation,
             role='assistant',
@@ -321,7 +358,7 @@ class ConcessionService:
             logger.debug('[payload] empty thesis')
             return None, '', ''
 
-        # Thesis-level NLI
+        # Thesis NLI
         self_scores = self.nli.bidirectional_scores(thesis, user_clean)
         thesis_agg = agg_max(self_scores)
         on_topic = self._on_topic_from_scores(self_scores)
@@ -329,13 +366,13 @@ class ConcessionService:
             '[payload] thesis_agg=%s | on_topic=%s', round3(thesis_agg), on_topic
         )
 
-        # Sentence scan (max contradiction)
+        # Sentence scan
         max_sent_contra, _ent, _scores_at_max = self._max_contra_self_vs_sentences(
             thesis, user_txt
         )
         logger.debug('[payload] max_sent_contra=%.3f', max_sent_contra)
 
-        # Pairwise best: assistant claims vs user
+        # Pairwise best
         claims = self._extract_claims(bot_txt)
         if claims:
             claim_scores = self._claim_scores(claims, user_clean)
@@ -386,7 +423,6 @@ class ConcessionService:
         return payload, user_txt, bot_txt
 
     # ----------------------------- helpers -----------------------------
-
     @staticmethod
     def _map_history(messages: List[Message]) -> List[dict]:
         return [
@@ -416,16 +452,21 @@ class ConcessionService:
 
     def _extract_claims(self, bot_txt: str) -> List[str]:
         """
-        Extract declarative, substantive claims from the assistant's prior turn,
-        excluding questions, acknowledgements, and meta stance banners.
+        Extracts declarative, substantive claims from the assistant's prior turn,
+        excluding questions (incl. Spanish openers) and meta banners.
+        Also guards against truncated final fragments.
         """
         if not bot_txt:
             return []
-        parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', bot_txt) if p.strip()]
+        raw_parts = [
+            p.strip() for p in re.split(r'(?<=[.!?…])\s+', bot_txt) if p.strip()
+        ]
+        parts = _strip_trailing_fragment(raw_parts)
+
         claims: List[str] = []
         skipped_banners = 0
         for s in parts:
-            if s.endswith('?'):
+            if s.endswith('?') or _looks_like_question(s):
                 continue
             s2 = drop_questions(s).strip()
             if not s2:
@@ -456,7 +497,7 @@ class ConcessionService:
             ent = float(agg.get('entailment', 0.0))
             con = float(agg.get('contradiction', 0.0))
             neu = float(agg.get('neutral', 1.0))
-            rel = max(ent, con, 1.0 - neu)  # relatedness proxy
+            rel = max(ent, con, 1.0 - neu)
             out.append((c, ent, con, rel, sc))
         return out
 
