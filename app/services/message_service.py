@@ -42,12 +42,14 @@ class MessageService(object):
         return await self.continue_conversation(message, conversation_id)
 
     async def start_conversation(self, topic: str, stance: Stance, message: str = None):
-        topic_valid = self.topic_checker.check_topic(message)
+        clean_topic = await self.topic_checker.check_topic(message)
 
-        if not topic_valid:
-            raise InvalidTopic(message=topic_valid.reason)
+        if not clean_topic.is_valid:
+            raise InvalidTopic(message=clean_topic.reason)
 
-        conversation = await self.repo.create_conversation(topic=topic, stance=stance)
+        conversation = await self.repo.create_conversation(
+            topic=clean_topic.normalized, stance=stance
+        )
 
         await self.repo.add_message(
             conversation_id=conversation.id, role='user', text=message

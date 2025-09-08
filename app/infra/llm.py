@@ -33,7 +33,7 @@ def make_claude():
 
     return AnthropicAdapter(
         api_key=settings.ANTHROPIC_API_KEY,
-        model=AnthropicModels.CLAUDE_35,
+        model='claude-sonnet-4-20250514',
         max_output_tokens=settings.MAX_OUTPUT_TOKENS,  # your existing budget
         difficulty=settings.DIFFICULTY,
     )

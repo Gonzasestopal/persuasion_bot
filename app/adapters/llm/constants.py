@@ -17,7 +17,7 @@ class OpenAIModels(str, Enum):
 
 
 class AnthropicModels(str, Enum):
-    CLAUDE_35 = 'claude-3-5-sonnet-latest'
+    CLAUDE_35 = 'claude-sonnet-4-20250514'
 
 
 SYSTEM_PROMPT = (

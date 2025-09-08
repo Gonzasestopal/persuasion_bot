@@ -10,6 +10,7 @@ from app.adapters.llm.constants import (
     AnthropicModels,
     Difficulty,
 )
+from app.adapters.llm.types import TopicResult
 from app.domain.enums import Stance
 from app.domain.models import Conversation, Message
 from app.domain.ports.llm import LLMPort
@@ -125,37 +126,30 @@ class AnthropicAdapter(LLMPort):
 
         # 1) INVALID: (full one-liner, localized). Keep the raw line as 'reason'.
         if up.startswith('INVALID'):
-            return {
-                'is_valid': 'false',
-                'reason': out,  # keep full localized one-liner
-                'normalized': None,
-                'raw': out,
-            }
+            return TopicResult(
+                is_valid=False,
+                reason=out,
+                normalized=None,
+            )
 
         # 2) VALID: <normalized_topic>
         m = re.match(r'^\s*VALID\s*:\s*(.+?)\s*$', out, flags=re.IGNORECASE)
         if m:
             normalized = m.group(1)
-            return {
-                'is_valid': 'true',
-                'reason': '',
-                'normalized': normalized,
-                'raw': out,
-            }
+            return TopicResult(
+                is_valid=True,
+                normalized=normalized,
+            )
 
         # (optional) backward-compat: accept exact "VALID" with no payload
         if up == 'VALID':
-            return {
-                'is_valid': 'true',
-                'reason': '',
-                'normalized': topic,  # or "" if you prefer
-                'raw': out,
-            }
-
+            return TopicResult(
+                is_valid=True,
+                normalized=topic,
+            )
         # 3) Fallback
-        return {
-            'is_valid': 'false',
-            'reason': 'unrecognized',
-            'normalized': None,
-            'raw': out,
-        }
+        return TopicResult(
+            is_valid=False,
+            reason='unrecognized',
+            normalized=None,
+        )

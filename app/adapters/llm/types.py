@@ -3,5 +3,6 @@ from dataclasses import dataclass
 
 @dataclass
 class TopicResult:
-    reason: str
-    valid: bool
+    is_valid: bool
+    normalized: str
+    reason: str = None

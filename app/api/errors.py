@@ -21,6 +21,13 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={'detail': exc.message},
         )
 
+    @app.exception_handler(de.InvalidTopic)
+    async def _422_topic(_: Request, exc: de.InvalidContinuationMessage):
+        return JSONResponse(
+            status_code=st.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={'detail': exc.message},
+        )
+
     @app.exception_handler(de.ConversationNotFound)
     async def _404_not_found(_: Request, exc: de.ConversationNotFound):
         return JSONResponse(
