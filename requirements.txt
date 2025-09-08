@@ -1,0 +1,24 @@
+# Core
+anthropic
+fastapi
+httpx
+huggingface_hub
+openai
+protobuf
+psycopg2-binary
+psycopg[binary]==3.2.*
+psycopg_pool
+pydantic-settings
+python-dotenv
+torch
+transformers
+uvicorn[standard]
+yoyo-database-migrations
+
+# Dev
+pytest
+pytest-asyncio
+pytest-cov
+ruff
+commitizen~=3.9.0
+pre-commit

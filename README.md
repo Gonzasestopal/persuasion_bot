@@ -4,19 +4,21 @@ An LLM-based chatbot that takes in messages from a user, processes them, and gen
 ## 📜 Table of Contents
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Entities](#entities)
-4. [Folder Structure](#folder-structure)
-5. [Tech Stack](#tech-stack)
-6. [Getting Started](#getting-started)
-7. [API Documentation](#api-documentation)
-8. [Example Requests](#example-requests)
-9. [Non Functional Requirements](#non-functional-requirements)
-10. [Database Optimization](#database-optimization)
-11. [Production Considerations](#production-considerations)
-12. [LLM](#llm)
-13. [Deployment Guide](#deployment-guide)
-14. [Testing](#testing)
-15. [Debate Argument Evaluation](#debate-evaluation)
+3. [Agents][#agents]
+4. [Entities](#entities)
+5. [Folder Structure](#folder-structure)
+6. [Tech Stack](#tech-stack)
+7. [Getting Started](#getting-started)
+8. [API Documentation](#api-documentation)
+9. [Example Requests](#example-requests)
+10. [Non Functional Requirements](#non-functional-requirements)
+11. [Database Optimization](#database-optimization)
+12. [Production Considerations](#production-considerations)
+13. [LLM](#llm)
+14. [Deployment Guide](#deployment-guide)
+15. [Testing](#testing)
+16. [Debate Argument Evaluation](#debate-evaluation)
+17. [Signals](#️-signals)
 
 
 ---
@@ -54,6 +56,41 @@ This ensures concessions only happen after meaningful, multi-turn reasoning, pro
 - **API**: REST API built with FastAPI.
 - **Database**: PostgreSQL.
 - **Cache**: Redis Cache to improve latency and enable rate limiting.
+
+
+---
+
+## 🧑‍🤝‍🧑 Agents
+
+The system is organized into **cooperating agents** with clear responsibilities:
+
+- **MessageService (Orchestrator)**
+  Coordinates the debate loop. Loads state, forwards conversation turns, and saves updates.
+
+- **ConcessionService (Policy)**
+  Judges the last user–assistant pair.
+
+  Updates in-memory running aggregates (RunningScores).
+
+  Builds hidden <SCORING> signals and injects them into the LLM’s system prompt.
+  This keeps policy decisions inside the LLM prompt itself, while still feeding structured semantic signals.
+
+- **Judge (Brain)**
+  Each user–assistant message pair is sent to the **Judge agent** (powered by NLI models like RoBERTa or DeBERTa).
+  The Judge returns a structured verdict:
+  ```json
+  {
+    "verdict": "accept",
+    "reason": "strict_thesis_contradiction",
+    "confidence": 0.85
+  }
+  ```
+  This verdict feeds into signals and ultimately influences concessions.
+
+- **Renderer**
+  Takes the debate reply and optionally appends context (e.g., debug signals or final verdict lines).
+
+By structuring agents this way, the **debate agent (assistant)** is never fully autonomous: it always defers judgment to its **Judge brain** before deciding whether to concede or press on.
 
 ---
 
@@ -153,10 +190,6 @@ LLM_TEMPERATURE=0.3
 MAX_OUTPUT_TOKENS=120
 REQUEST_TIMEOUT_S=25
 LLM_PER_PROVIDER_TIMEOUT_S=12
-
-# --- Winning Rules ---
-MIN_ASSISTANT_TURNS_BEFORE_VERDICT=5
-REQUIRED_POSITIVE_JUDGEMENTS=2
 
 ```
 
@@ -370,3 +403,54 @@ Contradiction (disagreement)
 This hybrid approach ensures that concessions are grounded in semantic alignment/contradiction rather than superficial rule-matching, making the debate more resistant to adversarial shortcuts.
 
 </details>
+
+---
+
+## 🛰️ Signals
+
+During debates, the system tracks **semantic signals** derived from NLI scoring and running aggregates. These signals are **in-memory only** (not stored in the DB) and are primarily used for debugging and evaluation.
+
+**Tracked signals:**
+- `turns` → number of assistant turns completed
+- `opp` / `same` / `unk` → counts of contradiction, entailment, and neutral judgments
+- `tE` / `tC` → topic-based entailment/contradiction moving averages
+- `pE` / `pC` → position-based entailment/contradiction moving averages
+
+### JSON Example
+
+When requesting a debate turn in debug mode, the response payload may include a `signals` object:
+
+**Request**
+```json
+POST /messages
+{
+  "conversation_id": 42,
+  "message": "Sports divide people as much as they unite them."
+}
+```
+
+**Response**
+```json
+{
+  "conversation_id": 42,
+  "reply": "Sports provide teamwork and discipline, which outweigh the divisions.",
+  "signals": {
+    "turns": 2,
+    "opp": 1,
+    "same": 0,
+    "unk": 1,
+    "tE": 0.72,
+    "tC": 0.15,
+    "pE": 0.40,
+    "pC": 0.30
+  }
+}
+```
+
+### Debug Hint Example
+
+If `DEBUG=1` is enabled, a log line will also be shown:
+
+```
+[Signals] turns=2 opp=1 same=0 unk=1 | tE=0.72 tC=0.15 pE=0.40 pC=0.30
+```
