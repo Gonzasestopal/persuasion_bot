@@ -33,7 +33,7 @@ class RunningScores:
         align: str,
         ts: Dict[str, float],
         ps: Dict[str, float],
-        alpha: float = 0.3,
+        alpha: float = 0.40,
     ) -> None:
         self.turns += 1
         if align == 'OPPOSITE':
@@ -69,14 +69,38 @@ def bot_thesis(topic: str, bot_stance: str) -> str:
 
 
 def nli_confident(
-    scores: Dict[str, float], *, pmin: float = 0.75, margin: float = 0.15
+    scores: Dict[str, float], *, pmin: float = 0.70, margin: float = 0.10
 ) -> bool:
+    """
+    Softer confidence: lower pmin and margin.
+    True if top prob >= pmin and (top - second) >= margin.
+    """
     vals = sorted((float(v) for v in scores.values()), reverse=True)
     if not vals:
         return False
     if len(vals) == 1:
         return vals[0] >= pmin
     return vals[0] >= pmin and (vals[0] - vals[1]) >= margin
+
+
+def _soft_label_from_scores(
+    ent: float,
+    contr: float,
+    *,
+    ent_thr: float,
+    contr_thr: float,
+    soft_band: float = 0.08,  # 8% slack band
+) -> str:
+    """
+    Soft band around thresholds with guard against the opposite side being strong.
+    """
+    # Prefer contradiction if near/above threshold and entailment is not strong
+    if contr >= contr_thr or (contr >= contr_thr - soft_band and ent < 0.55):
+        return 'OPPOSITE'
+    # Prefer entailment if near/above threshold and contradiction is not strong
+    if ent >= ent_thr or (ent >= ent_thr - soft_band and contr < 0.55):
+        return 'SAME'
+    return 'UNKNOWN'
 
 
 def alignment_and_scores_topic_aware(
@@ -191,61 +215,117 @@ def features_from_last_eval(
     ts = ev['thesis_scores']
     ps = ev['scores']
     user_len = len(ev.get('user_text_sample', '') or '')
-    thesis_ok = nli_confident(ts)
-    pair_ok = nli_confident(ps) and user_len >= 30
+    # Keep for telemetry; not used to block soft cases
     return {
         'entailment_threshold': entailment_threshold,
         'contradiction_threshold': contradiction_threshold,
-        'pmin': 0.75,
-        'margin': 0.15,
-        'min_user_len': 30,
-        'thesis_entailment': float(ts['entailment']),
-        'thesis_contradiction': float(ts['contradiction']),
-        'pair_entailment': float(ps['entailment']),
-        'pair_contradiction': float(ps['contradiction']),
-        'pair_confident': bool(pair_ok),
-        'thesis_confident': bool(thesis_ok),
+        'pmin': 0.66,  # softer
+        'margin': 0.06,  # softer
+        'min_user_len': 8,  # softer
+        'thesis_entailment': float(ts.get('entailment', 0.0)),
+        'thesis_contradiction': float(ts.get('contradiction', 0.0)),
+        'pair_entailment': float(ps.get('entailment', 0.0)),
+        'pair_contradiction': float(ps.get('contradiction', 0.0)),
+        'pair_confident': True,  # don’t hard-gate; logging only
+        'thesis_confident': True,  # don’t hard-gate; logging only
         'side': side,
         'user_len': user_len,
     }
 
 
+def _soft_label_from_scores(
+    ent: float,
+    contr: float,
+    *,
+    ent_thr: float,
+    contr_thr: float,
+    soft_band: float = 0.08,  # 8% slack band
+) -> str:
+    """
+    Soft band around thresholds with guard against the opposite side being strong.
+    """
+    # Prefer contradiction if near/above threshold and entailment is not strong
+    if contr >= contr_thr or (contr >= contr_thr - soft_band and ent < 0.55):
+        return 'OPPOSITE'
+    # Prefer entailment if near/above threshold and contradiction is not strong
+    if ent >= ent_thr or (ent >= ent_thr - soft_band and contr < 0.55):
+        return 'SAME'
+    return 'UNKNOWN'
+
+
 def deterministic_verdict_from_eval(
     ev: Dict[str, any], *, entailment_threshold: float, contradiction_threshold: float
 ) -> ScoreVerdict:
-    ts = ev['thesis_scores']
-    ps = ev['scores']
-    thesis_ok = nli_confident(ts)
-    pair_ok = nli_confident(ps) and len(ev.get('user_text_sample', '') or '') >= 30
-    ent = ts['entailment']
-    contr = ts['contradiction']
+    """
+    SOFT++ verdicting:
+      - Wide soft bands around thresholds
+      - Minimal separation requirements
+      - Pairwise carry with tiny user texts
+      - No nli_confident gating for soft cases
+    """
+    ts = ev['thesis_scores']  # user -> thesis
+    ps = ev['scores']  # user <-> bot
 
-    if contr >= contradiction_threshold and contr > ent and thesis_ok:
+    ent = float(ts.get('entailment', 0.0))
+    con = float(ts.get('contradiction', 0.0))
+    p_ent = float(ps.get('entailment', 0.0))
+    p_con = float(ps.get('contradiction', 0.0))
+
+    user_len = len(ev.get('user_text_sample', '') or '')
+
+    # Very soft bands
+    thesis_band = 0.12  # accept within 12 points below threshold
+    pair_band = 0.10  # pairwise carry within 10 points
+    weak_guard = 0.60  # accept soft side if the other side < 0.60
+    sep_guard = 0.00  # no separation needed beyond being >= other (ultra soft)
+    min_user_len_pair = 8  # allow short texts to carry
+
+    # ---- Thesis-driven (prefer contradiction first for clashes) ----
+    # OPPOSITE if contradiction is above (thr - band) and at least not worse than entailment,
+    # and entailment isn't strongly high.
+    if (
+        con >= (contradiction_threshold - thesis_band)
+        and (con - ent) >= sep_guard
+        and ent < weak_guard
+    ):
+        conf = 0.88 if con >= contradiction_threshold else 0.78
         return {
             'alignment': 'OPPOSITE',
             'concession': True,
-            'reason': 'thesis_opposition',
-            'confidence': 0.8,
+            'reason': 'thesis_opposition_soft',
+            'confidence': conf,
         }
-    if ent >= entailment_threshold and ent > contr:
+
+    # SAME if entailment is above (thr - band) and at least not worse than contradiction,
+    # and contradiction isn't strongly high.
+    if (
+        ent >= (entailment_threshold - thesis_band)
+        and (ent - con) >= sep_guard
+        and con < weak_guard
+    ):
+        conf = 0.88 if ent >= entailment_threshold else 0.78
         return {
             'alignment': 'SAME',
             'concession': False,
-            'reason': 'same_stance',
-            'confidence': 0.8,
+            'reason': 'same_stance_soft',
+            'confidence': conf,
         }
-    if ps['contradiction'] >= contradiction_threshold and pair_ok:
+
+    # ---- Pairwise carry when thesis inconclusive ----
+    if user_len >= min_user_len_pair and p_con >= (contradiction_threshold - pair_band):
         return {
             'alignment': 'OPPOSITE',
             'concession': True,
-            'reason': 'pairwise_opposition',
-            'confidence': 0.7,
+            'reason': 'pairwise_opposition_soft',
+            'confidence': 0.72,
         }
+
+    # ---- Fallback ----
     return {
         'alignment': 'UNKNOWN',
         'concession': False,
         'reason': 'underdetermined',
-        'confidence': 0.5,
+        'confidence': 0.50,
     }
 
 

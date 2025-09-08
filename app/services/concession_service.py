@@ -26,7 +26,7 @@ logger.setLevel(logging.DEBUG)
 class _NLIConfig:
     model_name: str = 'roberta-large-mnli'
     entailment_threshold: float = 0.65
-    contradiction_threshold: float = 0.70
+    contradiction_threshold: float = 0.68  # was 0.70
     max_length: int = 512
     max_claims_per_turn: int = 3
 

@@ -62,17 +62,17 @@ def test_parset_check_maximum_length_input():
         parse_topic_side(topic + side)
 
 
-def test_parser_rejects_message_over_160_chars():
+def test_parser_rejects_message_over_200_chars():
     # Construimos un mensaje de más de 120 caracteres
-    long_message = 'a' * 160
+    long_message = 'a' * 200
     with pytest.raises(
         InvalidContinuationMessage, match='must be less than 160 characters'
     ):
         assert_no_topic_or_side_markers(long_message)
 
 
-def test_parser_accepts_message_under_160_chars():
-    # Construimos un mensaje de menos de 160 caracteres
+def test_parser_accepts_message_under_200_chars():
+    # Construimos un mensaje de menos de 200 caracteres
     message = 'I think dogs are better than cats because they provide partnership.'
     # No debe lanzar excepción
     assert assert_no_topic_or_side_markers(message)
