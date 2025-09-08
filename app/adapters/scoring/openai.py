@@ -49,4 +49,18 @@ class OpenAIScoreJudge(ScoreJudgePort):
         self.temperature = temperature
 
     async def score(self, *, features: ScoreFeatures) -> Optional[ScoreVerdict]:
-        return True
+        user = _features_to_prompt(features)
+        resp = self.client.responses.create(
+            model=self.model,
+            input=[
+                {'role': 'system', 'content': _SYSTEM},
+                {'role': 'user', 'content': user},
+            ],
+            temperature=self.temperature,
+            response_format={'type': 'json_schema', 'json_schema': _JSON_SCHEMA},
+        )
+        try:
+            data = resp.output_text
+            return json.loads(data)  # type: ignore
+        except Exception:
+            return None
