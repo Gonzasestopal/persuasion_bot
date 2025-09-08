@@ -187,34 +187,57 @@ class ConcessionService:
                     confidence=decision.confidence,
                 )
 
-                # confidence-gated tally
-                if (
-                    decision.accept
-                    and decision.confidence >= self.llm_judge_min_confidence
-                ):
-                    state.positive_judgements += 1
-                    logger.debug(
-                        "[judge] +ACCEPT (total=%s) reason=%s conf=%.2f | user='%s' | bot='%s'",
-                        state.positive_judgements,
-                        decision.reason,
-                        decision.confidence,
-                        trunc(user_txt, 80),
-                        trunc(bot_txt, 80),
-                    )
-                else:
-                    if decision.accept:
+                # ----------------------------- NOVELTY GUARD APPLIED HERE -----------------------------
+                if decision.accept:
+                    novelty_min = float(getattr(self.scoring, 'novelty_min', 0.25))
+                    try:
+                        user_idx = self._last_index(mapped, role='user')
+                        novelty = (
+                            self._latest_user_novelty(mapped, user_idx)
+                            if user_idx is not None
+                            else 1.0
+                        )
+                    except Exception:
+                        novelty = 1.0  # fail-open on novelty calc
+
+                    if decision.confidence < self.llm_judge_min_confidence:
                         logger.debug(
                             '[judge] ACCEPT dropped by confidence gate (%.2f < %.2f) | reason=%s',
                             decision.confidence,
                             self.llm_judge_min_confidence,
                             decision.reason,
                         )
-                    else:
+                    elif novelty < novelty_min:
+                        # Do not count as a positive judgment if the user repeated themselves.
+                        state.set_judge(
+                            accept=False,
+                            reason='novelty_reject_duplicate',
+                            confidence=decision.confidence,
+                        )
                         logger.debug(
-                            '[judge] REJECT reason=%s conf=%.2f',
+                            '[novelty] REJECT: novelty=%.3f < %.3f (duplicate/near-duplicate user turn) | user="%s"',
+                            novelty,
+                            novelty_min,
+                            trunc(user_txt, 80),
+                        )
+                    else:
+                        state.positive_judgements += 1
+                        logger.debug(
+                            "[judge] +ACCEPT (total=%s) reason=%s conf=%.2f novelty=%.3f | user='%s' | bot='%s'",
+                            state.positive_judgements,
                             decision.reason,
                             decision.confidence,
+                            novelty,
+                            trunc(user_txt, 80),
+                            trunc(bot_txt, 80),
                         )
+                else:
+                    logger.debug(
+                        '[judge] REJECT reason=%s conf=%.2f',
+                        decision.reason,
+                        decision.confidence,
+                    )
+                # -------------------------------------------------------------------------------
             except Exception as e:
                 logger.warning('[judge] scoring failed: %s', e)
         else:
@@ -554,3 +577,79 @@ class ConcessionService:
             ent_at_max,
         )
         return max_contra, ent_at_max, scores_at_max
+
+    @staticmethod
+    def _tokenize_norm(s: str) -> List[str]:
+        # Alphanumeric tokens, lowercased, punctuation stripped
+        if not s:
+            return []
+        s = s.lower()
+        s = s.translate(str.maketrans('', '', string.punctuation + '¿¡“”"…—–-'))
+        tokens = re.findall(r'\b\w+\b', s)
+        return [t for t in tokens if len(t) > 2 and t not in STOP_ALL]
+
+    @staticmethod
+    def _char_ngrams(s: str, n: int = 3) -> set:
+        if not s:
+            return set()
+        s2 = s.lower()
+        s2 = re.sub(r'\s+', ' ', s2).strip()
+        s2 = s2.translate(
+            str.maketrans('', '', ' \t\n\r' + string.punctuation + '¿¡“”"…—–-')
+        )
+        if len(s2) < n:
+            return {s2} if s2 else set()
+        return {s2[i : i + n] for i in range(len(s2) - n + 1)}
+
+    @staticmethod
+    def _jaccard(a: set, b: set) -> float:
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union else 0.0
+
+    def _novelty_score(self, current: str, previous_texts: List[str]) -> float:
+        """
+        Returns novelty in [0,1]. 1.0 = completely new, 0.0 = duplicated.
+        Uses a max-similarity penalty against any prior user message.
+        """
+        if not current:
+            return 0.0
+        if not previous_texts:
+            return 1.0
+
+        cur_ngrams = self._char_ngrams(current, n=3)
+        cur_tokens = set(self._tokenize_norm(current))
+
+        max_sim = 0.0
+        for prev in previous_texts:
+            prev_ngrams = self._char_ngrams(prev, n=3)
+            prev_tokens = set(self._tokenize_norm(prev))
+
+            jacc = self._jaccard(cur_ngrams, prev_ngrams)
+            tok_sim = (
+                len(cur_tokens & prev_tokens) / max(len(cur_tokens), len(prev_tokens))
+                if (cur_tokens or prev_tokens)
+                else 1.0
+            )
+            sim = 0.65 * jacc + 0.35 * tok_sim
+            if sim > max_sim:
+                max_sim = sim
+
+        novelty = 1.0 - max_sim
+        return max(0.0, min(1.0, novelty))
+
+    def _latest_user_novelty(self, convo: List[dict], latest_user_idx: int) -> float:
+        """
+        Compute novelty of the latest user message vs all *prior* user messages.
+        """
+        latest_txt = convo[latest_user_idx].get('content', '')
+        prev_users = [
+            m.get('content', '')
+            for i, m in enumerate(convo[:latest_user_idx])
+            if m.get('role') == 'user' and m.get('content')
+        ]
+        return self._novelty_score(latest_txt, prev_users)

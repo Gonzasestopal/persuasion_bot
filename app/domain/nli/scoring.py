@@ -7,6 +7,7 @@ class ScoringConfig:
     contradiction_threshold: float = 0.55
     strict_contra_threshold: float = 0.55  # ↓ from 0.85 (used as contra_min)
 
+    novelty_min: float = 0.25
     min_assistant_words: int = 8
 
     # Soft contradiction gates
