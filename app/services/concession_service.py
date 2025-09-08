@@ -5,6 +5,7 @@ import string
 from dataclasses import asdict
 from typing import Dict, List, Optional, Tuple
 
+from app.domain.concession_policy import DebateState
 from app.domain.enums import Stance
 from app.domain.mappings import END_REASON_MAP
 from app.domain.models import Message
@@ -50,7 +51,6 @@ class ConcessionService:
         llm: LLMPort,
         nli: NLIPort,
         judge: LLMPort,
-        debate_store: DebateStorePort,
         nli_config: Optional[NLIConfig] = None,
         scoring: Optional[ScoringConfig] = None,
         *,
@@ -59,7 +59,6 @@ class ConcessionService:
         self.llm = llm
         self.nli = nli
         self.judge = judge
-        self.debate_store = debate_store
         self.nli_config = nli_config or NLIConfig()
         self.scoring = scoring or ScoringConfig()
         self.llm_judge_min_confidence = float(llm_judge_min_confidence)
@@ -71,13 +70,8 @@ class ConcessionService:
         stance: Stance,
         conversation_id: int,
         topic: str,
+        state: DebateState,
     ) -> str:
-        state = self.debate_store.get(conversation_id)
-        if state is None:
-            raise RuntimeError(
-                f'DebateState missing for conversation_id={conversation_id}'
-            )
-
         # sync assistant turns from transcript to avoid drift
         turns_in_transcript = self._count_assistant_turns(messages)
         if state.assistant_turns != turns_in_transcript:
@@ -211,7 +205,6 @@ class ConcessionService:
                 state.assistant_turns + 1,
                 state.policy.max_assistant_turns,
             )
-            self.debate_store.save(conversation_id=conversation_id, state=state)
 
         # render
         if state.match_concluded:
@@ -224,13 +217,12 @@ class ConcessionService:
         if not state.match_concluded:
             state.assistant_turns = turns_in_transcript + 1
 
-        self.debate_store.save(conversation_id=conversation_id, state=state)
         logger.debug(
             '[analyze] returning reply (len=%d) | ended=%s',
             len(reply),
             state.match_concluded,
         )
-        return reply
+        return reply, state
 
     # ----------------------------- LLM end rendering -----------------------------
     async def _render_end_via_llm(self, messages: List[Message], state) -> str:

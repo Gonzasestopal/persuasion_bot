@@ -30,7 +30,6 @@ class MessageService(object):
         self.topic_checker = topic_checker
         self.concession_service = concession_service or ConcessionService(
             llm=llm,
-            debate_store=self.debate_store,
         )
 
     async def handle(self, message: str, conversation_id: Optional[int] = None):
@@ -96,12 +95,19 @@ class MessageService(object):
 
         full_history = await self.repo.all_messages(conversation_id=cid)
 
+        state = self.debate_store.get(cid)
+        if state is None:
+            raise ConversationNotFound('debate state not found or expired')
+
         reply = await self.concession_service.analyze_conversation(
             messages=full_history,
             stance=conversation.stance,
             conversation_id=conversation_id,
             topic=conversation.topic,
         )
+
+        # Persist updated state
+        self.debate_store.save(conversation_id=cid, state=updated_state)
 
         await self.repo.add_message(conversation_id=cid, role='bot', text=reply)
 
