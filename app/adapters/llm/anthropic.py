@@ -1,20 +1,28 @@
 import json
-import re
-from typing import Iterable, List, Optional
+import logging
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 from anthropic import AsyncAnthropic
 
 from app.adapters.llm.constants import (
+    JUDGE_SYSTEM_PROMPT,
     MEDIUM_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TOPIC_CHECKER_SYSTEM_PROMPT,
     AnthropicModels,
     Difficulty,
 )
-from app.adapters.llm.types import TopicResult
+from app.adapters.llm.types import JudgeResult, TopicResult
 from app.domain.enums import Stance
 from app.domain.models import Conversation, Message
 from app.domain.ports.llm import LLMPort
+
+Jsonable = Union[
+    Dict[str, Any], Mapping[str, Any]
+]  # or your specific payload dataclass via asdict()
+
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicAdapter(LLMPort):
@@ -63,10 +71,14 @@ class AnthropicAdapter(LLMPort):
             temperature=self.temperature,
             max_tokens=self.max_output_tokens,
         )
-        # Join text blocks from the response
+        return self._parse_single_text(resp)
+
+    @staticmethod
+    def _parse_single_text(resp) -> str:
+        # Join text blocks from the response into a single string
         return ''.join(
             block.text
-            for block in resp.content
+            for block in getattr(resp, 'content', [])
             if getattr(block, 'type', None) == 'text'
         )
 
@@ -86,20 +98,15 @@ class AnthropicAdapter(LLMPort):
         )
 
     async def check_topic(self, topic: str, stance: str) -> TopicResult:
-        """
-        Returns TopicResult shaped like:
-            {
-            "is_valid": True|False,
-            "reason": "<one-liner if invalid or ''>",
-            "normalized": "<normalized claim or None>",
-            "raw": "<model raw text>",
-            "stance_normalized": "<pro|con or None>",
-            }
-        """
         sys = self._topic_gate_system_prompt(topic=topic, stance=stance)
 
-        # IMPORTANT: Send the inputs exactly as the system prompt expects.
-        # (Uppercase keys to reduce brittleness.)
+        logger.info(
+            '[topic_gate.req] topic_raw=%r stance_requested=%s model=%s',
+            topic,
+            stance,
+            self.model,
+        )
+
         user_prompt = (
             f'TOPIC: {topic}\n'
             f'STANCE: {stance}\n'
@@ -110,37 +117,33 @@ class AnthropicAdapter(LLMPort):
             model=self.model,
             system=sys,
             messages=[
-                {
-                    'role': 'user',
-                    'content': [{'type': 'text', 'text': user_prompt}],
-                }
+                {'role': 'user', 'content': [{'type': 'text', 'text': user_prompt}]}
             ],
             temperature=0.0,
-            max_tokens=max(
-                self.max_output_tokens, 64
-            ),  # allow enough room for the JSON
+            max_tokens=max(self.max_output_tokens, 64),
+        )
+        out = self._parse_single_text(resp).strip()
+
+        # Log the raw one-line model output, truncated (to avoid log spam)
+        logger.debug(
+            '[topic_gate.raw_out] %s', (out[:300] + '…') if len(out) > 300 else out
         )
 
-        out = ''.join(
-            block.text
-            for block in resp.content
-            if getattr(block, 'type', None) == 'text'
-        ).strip()
-
-        # 1) INVALID (strict localized one-liner). Keep raw line in 'reason'.
         up = out.upper()
         if up.startswith('INVALID:'):
+            logger.info('[topic_gate.result] status=INVALID reason=%r', out)
             return TopicResult(
                 is_valid=False,
                 normalized=None,
                 reason=out,
-                normalized_stance=None,  # no stance if invalid
+                normalized_stance=None,
                 raw=out,
             )
+
         try:
             obj = json.loads(out)
         except json.JSONDecodeError:
-            # Unrecognized format
+            logger.warning('[topic_gate.parse_error] non_json_out=%r', out[:120])
             return TopicResult(
                 is_valid=False,
                 normalized=None,
@@ -149,15 +152,16 @@ class AnthropicAdapter(LLMPort):
                 raw=out,
             )
 
-        # Validate minimal schema (be strict but helpful)
-        required_keys = {
-            'status',
-            'topic_normalized',
-            'stance_final',
-        }
-
-        if not isinstance(obj, dict) or required_keys - obj.keys():
-            print('rip', obj.keys())
+        required_keys = {'status', 'topic_normalized', 'stance_final'}
+        if (
+            not isinstance(obj, dict)
+            or required_keys - obj.keys()
+            or obj.get('status') != 'VALID'
+        ):
+            logger.warning(
+                '[topic_gate.schema_mismatch] obj_keys=%s',
+                sorted(obj.keys()) if isinstance(obj, dict) else type(obj),
+            )
             return TopicResult(
                 is_valid=False,
                 normalized=None,
@@ -166,8 +170,17 @@ class AnthropicAdapter(LLMPort):
                 raw=out,
             )
 
-        if obj.get('status') != 'VALID':
-            # If the model returned JSON but not VALID, treat as invalid text.
+        normalized = (obj.get('topic_normalized') or '').strip()
+        stance_final = (obj.get('stance_final') or '').strip().lower()
+        pol_raw = (obj.get('polarity_raw') or '').strip().lower()
+        pol_norm = (obj.get('polarity_normalized') or '').strip().lower()
+
+        if not normalized or stance_final not in {'pro', 'con'}:
+            logger.warning(
+                '[topic_gate.bad_values] normalized=%r stance_final=%r',
+                normalized,
+                stance_final,
+            )
             return TopicResult(
                 is_valid=False,
                 normalized=None,
@@ -176,21 +189,75 @@ class AnthropicAdapter(LLMPort):
                 raw=out,
             )
 
-        normalized: str = obj.get('topic_normalized') or ''
-        stance_final: Optional[str] = obj.get('stance_final')
-        if not normalized.strip() or stance_final not in {'pro', 'con'}:
-            return TopicResult(
-                is_valid=False,
-                normalized=None,
-                reason='unrecognized',
-                normalized_stance=None,
-                raw=out,
-            )
+        logger.info(
+            '[topic_gate.result] status=VALID lang=%s pol_raw=%s pol_norm=%s stance_req=%s stance_final=%s topic_norm=%r',
+            obj.get('lang'),
+            pol_raw,
+            pol_norm,
+            stance,
+            stance_final,
+            normalized,
+        )
 
         return TopicResult(
             is_valid=True,
-            normalized=normalized.strip(),
+            normalized=normalized,
             reason='',
             normalized_stance=stance_final,
             raw=out,
+        )
+
+    async def nli_judge(self, *, payload: Jsonable) -> JudgeResult:
+        """
+        Send a single JSON payload to the LLM (Anthropic) with the given `system` prompt.
+        Expects a single-line JSON response with keys:
+            verdict: "SAME" | "OPPOSITE" | "UNKNOWN"
+            concession: bool
+            confidence: float (0..1)
+            reason: short string
+        Returns a JudgeDecision; raises ValueError on parse/validation failure.
+        """
+        # Serialize compactly; if payload is a dataclass, pass asdict(payload)
+        user_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+
+        resp = await self.client.messages.create(
+            model=self.model,
+            system=JUDGE_SYSTEM_PROMPT,  # <-- use the provided system prompt
+            messages=[
+                {
+                    'role': 'user',
+                    'content': [{'type': 'text', 'text': user_text}],
+                }
+            ],
+            temperature=0.0,
+            max_tokens=160,
+        )
+
+        out = self._parse_single_text(resp).strip()
+
+        # Parse JSON
+        try:
+            obj = json.loads(out)
+        except json.JSONDecodeError as e:
+            raise ValueError(f'LLM judge returned non-JSON: {out!r}') from e
+
+        # Minimal schema validation + normalization
+        verdict = str(obj.get('verdict', '')).upper()
+        concession = bool(obj.get('concession', False))
+        reason = str(obj.get('reason', '') or '')
+        try:
+            confidence = float(obj.get('confidence', 0.0))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'Invalid confidence: {obj.get("confidence")!r}') from e
+
+        if verdict not in {'SAME', 'OPPOSITE', 'UNKNOWN'}:
+            raise ValueError(f'Invalid verdict: {verdict!r}')
+        if not (0.0 <= confidence <= 1.0):
+            raise ValueError(f'Confidence out of range: {confidence!r}')
+
+        return JudgeResult(
+            verdict=verdict,
+            concession=concession,
+            confidence=confidence,
+            reason=reason,
         )

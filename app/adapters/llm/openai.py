@@ -1,12 +1,17 @@
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 
 from openai import OpenAI
 
 from app.adapters.llm.constants import AWARE_SYSTEM_PROMPT, Difficulty, OpenAIModels
+from app.adapters.llm.types import JudgeResult, TopicResult
 from app.domain.concession_policy import DebateState
 from app.domain.enums import Stance
 from app.domain.models import Conversation, Message
 from app.domain.ports.llm import LLMPort
+
+Jsonable = Union[
+    Dict[str, Any], Mapping[str, Any]
+]  # or your specific payload dataclass via asdict()
 
 
 class OpenAIAdapter(LLMPort):
@@ -98,3 +103,6 @@ class OpenAIAdapter(LLMPort):
 
     async def check_topic(self, topic: str, language: str = 'en') -> dict:
         raise NotImplementedError
+
+    async def nli_judge(self, *, payload: Jsonable) -> JudgeResult:
+        return None

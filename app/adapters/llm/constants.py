@@ -193,14 +193,18 @@ Your tasks, in order (apply ALL deterministically):
    - {TOPIC} must be a clear, arguable proposition (a sentence that can be supported or opposed).
    - If not debate-ready, output INVALID using the STRICT template (see bottom).
 
-2) Normalization (keep the detected language for output: en, es, or pt):
-   - Remove hedges like:
-     en: ["I think","I don’t think","I don't think","I believe","it seems that","in my opinion"]
-     es: ["creo que","pienso que","no creo que","me parece que","en mi opinión"]
-     pt: ["acho que","penso que","não acho que","me parece que","na minha opinião"]
-   - Expand contractions (en): "don't"→"do not", "doesn't"→"does not", "can't"→"cannot", etc.
-   - Collapse explicit double negatives: e.g., "does not not exist"→"exists", "not impossible"→"possible".
-   - Prefer a short, minimal, declarative sentence (no first person, no modality) while preserving meaning.
+2) Normalization (keep the detected language for output: en, es, or pt). Apply in THIS order:
+   a) Expand contractions (en): "don't"→"do not", "doesn't"→"does not", "can't"→"cannot", etc.
+   b) Remove hedges (match BOTH contracted and expanded forms; case-insensitive):
+      en: ["I think","I don't think","I don’t think","I do not think","I believe","I do not believe",
+           "it seems that","it does not seem that","in my opinion"]
+      es: ["creo que","pienso que","no creo que","me parece que","no me parece que","en mi opinión"]
+      pt: ["acho que","penso que","não acho que","não penso que","me parece que","não me parece que","na minha opinião"]
+   c) Collapse explicit double negatives:
+      - Within a clause: "does not not exist"→"exists", "not impossible"→"possible".
+      - Across removed-hedge boundary when a NEGATED hedge scopes a NEGATED proposition:
+        e.g., "I do not think [God does not exist]" → "God exists".
+   d) Prefer a short, minimal, declarative sentence (no first person, no modality) while preserving meaning.
 
 3) Polarity (two values):
    - polarity_raw: computed from {TOPIC} AFTER contraction expansion but BEFORE hedge removal and double-negative collapse.
@@ -264,4 +268,34 @@ TOPIC: Deus existe
 STANCE: con
 OUTPUT:
 {"status":"VALID","lang":"pt","topic_raw":"Deus existe","topic_normalized":"Deus existe","polarity_raw":"pos","polarity_normalized":"pos","stance_requested":"con","stance_final":"con"}
+"""
+
+
+JUDGE_SYSTEM_PROMPT = """
+You are a strict, deterministic NLI Judge.
+Your job: decide whether the user's last message concedes, opposes, or is neutral relative to the assistant's defended thesis.
+
+Input (JSON in the single user message) contains:
+- topic: normalized debate thesis the assistant is defending (string, short, declarative)
+- stance: "pro" or "con" (relative to the topic)
+- user_text: the user's last message (string)
+- bot_text: the assistant's previous message that the user replied to (string)
+- thesis_scores: { "entailment": number, "contradiction": number, "neutral": number }  // aggregated NLI scores
+- pair_best: { "entailment": number, "contradiction": number, "neutral": number }      // best claim-vs-user scores
+- max_sent_contra: number  // max contradiction vs any user sentence
+- on_topic: boolean
+- user_wc: integer
+
+Decision rules:
+1) Concede if (a) on_topic is true AND (b) there is strong contradiction against the defended thesis.
+2) "Strong contradiction" means contradiction is high and clearly exceeds entailment.
+3) Do NOT concede if the input is off_topic OR user_wc is too small (gate).
+4) SAME if the user's text strongly supports or entails the defended thesis.
+5) UNKNOWN if evidence is weak, mixed, or inconclusive.
+6) Be conservative: only assign OPPOSITE (with concession=true) or SAME when evidence is strong.
+
+STRICT OUTPUT — one line JSON ONLY with these fields:
+{"verdict":"SAME|OPPOSITE|UNKNOWN","concession":true|false,"confidence":0..1,"reason":"<short_snake_case>"}
+
+No extra commentary, no markdown, no code fences.
 """

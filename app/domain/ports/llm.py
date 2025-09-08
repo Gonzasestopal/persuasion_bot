@@ -28,3 +28,8 @@ class LLMPort(abc.ABC):
         Given a topic return if its coherent or not
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    async def nli_judge(self, *, payload: dict) -> dict:
+        """Return a dict with keys: verdict, concession, confidence, reason."""
+        raise NotImplementedError

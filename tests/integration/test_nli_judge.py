@@ -12,25 +12,7 @@ from app.adapters.llm.constants import JUDGE_SYSTEM_PROMPT, AnthropicModels, Dif
 from app.adapters.llm.types import JudgeResult
 
 pytestmark = pytest.mark.integration
-
-
-# -------- Payload dataclass matching the prompt --------
-@dataclass
-class NLIJudgePayload:
-    topic: str  # normalized thesis the assistant defends
-    stance: str  # "pro" | "con"
-    user_text: str  # last user message
-    bot_text: str  # assistant message user replied to
-    thesis_scores: Dict[
-        str, float
-    ]  # {"entailment":..., "contradiction":..., "neutral":...}
-    pair_best: Dict[str, float]  # best claim-vs-user scores
-    max_sent_contra: float  # max contradiction vs any user sentence
-    on_topic: bool  # whether thesis vs user is on-topic
-    user_wc: int  # user word count
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+from app.domain.nli.judge_payload import NLIJudgePayload
 
 
 # -------- Minimal fake Anthropic client --------
