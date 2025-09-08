@@ -1,6 +1,5 @@
 # tests/integration/test_nli_judge.py
 import json
-from dataclasses import asdict, dataclass
 from typing import Any, Dict, List
 
 import pytest
@@ -85,7 +84,7 @@ async def test_nli_judge_parses_valid_response(
         user_wc=37,
     ).to_dict()
 
-    decision = await adapter.nli_judge(system=JUDGE_SYSTEM_PROMPT, payload=payload)
+    decision = await adapter.nli_judge(payload=payload)
 
     # Parsed decision
     assert isinstance(decision, JudgeResult)
@@ -134,7 +133,6 @@ async def test_nli_judge_low_confidence_still_parses(
     fake_anthropic.return_text = '{"verdict":"SAME","concession":false,"confidence":0.25,"reason":"weak_support"}'
 
     decision = await adapter.nli_judge(
-        system=JUDGE_SYSTEM_PROMPT,
         payload=NLIJudgePayload(
             topic='God exists',
             stance='pro',
@@ -161,7 +159,6 @@ async def test_nli_judge_invalid_json_raises(
     fake_anthropic.return_text = 'INVALID: not-json'
     with pytest.raises(ValueError):
         await adapter.nli_judge(
-            system=JUDGE_SYSTEM_PROMPT,
             payload=NLIJudgePayload(
                 topic='Free speech should be restricted',
                 stance='con',
@@ -189,7 +186,6 @@ async def test_nli_judge_invalid_verdict_raises(
     )
     with pytest.raises(ValueError):
         await adapter.nli_judge(
-            system=JUDGE_SYSTEM_PROMPT,
             payload=NLIJudgePayload(
                 topic='Economic growth should be prioritized over environment',
                 stance='pro',
@@ -217,7 +213,6 @@ async def test_nli_judge_confidence_out_of_range_raises(
     )
     with pytest.raises(ValueError):
         await adapter.nli_judge(
-            system=JUDGE_SYSTEM_PROMPT,
             payload=NLIJudgePayload(
                 topic='AI should be regulated',
                 stance='pro',
