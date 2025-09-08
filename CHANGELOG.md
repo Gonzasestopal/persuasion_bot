@@ -1,3 +1,18 @@
+## v1.11.0 (2025-09-08)
+
+### Feat
+
+- map judge reasons to domain
+- judge reasons mapping
+- end debate llm
+- expose win condition
+- show end reason at the end
+- connect judge to concession service
+
+### Refactor
+
+- connect judge bot to debate bot
+
 ## v1.10.0 (2025-09-08)
 
 ### Feat
