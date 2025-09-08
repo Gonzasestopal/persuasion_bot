@@ -4,19 +4,20 @@ An LLM-based chatbot that takes in messages from a user, processes them, and gen
 ## 📜 Table of Contents
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Entities](#entities)
-4. [Folder Structure](#folder-structure)
-5. [Tech Stack](#tech-stack)
-6. [Getting Started](#getting-started)
-7. [API Documentation](#api-documentation)
-8. [Example Requests](#example-requests)
-9. [Non Functional Requirements](#non-functional-requirements)
-10. [Database Optimization](#database-optimization)
-11. [Production Considerations](#production-considerations)
-12. [LLM](#llm)
-13. [Deployment Guide](#deployment-guide)
-14. [Testing](#testing)
-15. [Debate Argument Evaluation](#debate-evaluation)
+3. [Agents](#agents)
+4. [Entities](#entities)
+5. [Folder Structure](#folder-structure)
+6. [Tech Stack](#tech-stack)
+7. [Getting Started](#getting-started)
+8. [API Documentation](#api-documentation)
+9. [Example Requests](#example-requests)
+10. [Non Functional Requirements](#non-functional-requirements)
+11. [Database Optimization](#database-optimization)
+12. [Production Considerations](#production-considerations)
+13. [LLM](#llm)
+14. [Deployment Guide](#deployment-guide)
+15. [Testing](#testing)
+16. [Debate Argument Evaluation](#debate-evaluation)
 
 
 ---
@@ -56,6 +57,88 @@ This ensures concessions only happen after meaningful, multi-turn reasoning, pro
 - **Cache**: Redis Cache to improve latency and enable rate limiting.
 
 ---
+
+## Agents
+
+This project implements a **4-brain architecture** for structured debates:
+
+1. **Topic Ingestion** – normalize & validate debate topics
+2. **Debate Bot** – generate pro/con arguments in a turn-based state machine
+3. **Judge** – evaluate contradictions and decide concessions/verdicts
+4. **Ender** – renders the final two-line verdict message (stance-agnostic, celebratory when appropriate)
+
+---
+
+### 🧠 1) Topic Ingestion (summary)
+
+Sanitize and prepare topics for debate.
+
+- Normalize double negatives → canonical claim
+  *(e.g., “I don’t think God does not exist” → “God exists”)*
+- Detect language and stance (**PRO/CON**)
+- Validate debateability (reject gibberish, too short, off-topic, unsafe)
+- Output:
+```json
+{
+  "topic_normalized": "God exists",
+  "stance": "pro",
+  "language": "en",
+  "is_valid": true,
+  "reason": null
+}
+```
+
+---
+
+### 🤖 2) Debate Bot (summary)
+
+- Inputs: `user_turn + DebateState + topic_info`
+- Outputs:
+```json
+{
+  "assistant_reply": "...",
+  "state": { "turn_index": 3, "stars": 2, "...": "..." }
+}
+```
+- Always defends assigned stance, respects style/length constraints, varies argument angle each turn, acknowledges partial merit without conceding.
+
+---
+
+### ⚖️ 3) Judge (summary)
+
+- Combines **fast NLI** scores with a small LLM head that emits a structured JSON decision.
+- Uses policy thresholds (required positives, max turns) and novelty guard.
+
+Example output:
+```json
+{
+  "accept": true,
+  "ended": false,
+  "confidence": 0.82,
+  "reason": "strict_thesis_contradiction",
+  "metrics": { "defended_contra": 0.88, "defended_ent": 0.04, "max_sent_contra": 0.86 }
+}
+```
+
+**Reason codes → UI hints:**
+- `strict_thesis_contradiction` → “Your reply strongly contradicted the thesis.”
+- `ambiguous_evidence` → “Evidence was mixed/weak; not enough to score.”
+- `off_topic` → “Your reply was off-topic compared to ‘{TOPIC}’.”
+- `positive_judgements_reached` → “Enough accepted points under policy.”
+- `policy_turn_limit` → “Closed due to max turns policy.”
+
+> **Note:** `confidence` is **per-turn** (0–1). It is **not cumulative**. Positive judgments are what accumulate.
+
+---
+
+### 🏁 4) Ender (server-controlled finale)
+
+**Purpose:** Render a **two-line**, stance-agnostic verdict message when the debate ends.
+- Line 1: short explanation of why it ended; **congratulate + one emoji** if the user prevailed.
+- Line 2: plain-English explanation of **reason** and **confidence** (0–1 scale).
+
+---
+
 
 ## Entities
 ![Entities](docs/entities.png)
