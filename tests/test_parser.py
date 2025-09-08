@@ -1,7 +1,7 @@
 import pytest
 
-from app.domain.errors import InvalidStartMessage
-from app.domain.parser import parse_topic_side
+from app.domain.errors import InvalidContinuationMessage, InvalidStartMessage
+from app.domain.parser import assert_no_topic_or_side_markers, parse_topic_side
 
 
 def test_parser_empty_message():
@@ -60,3 +60,19 @@ def test_parset_check_maximum_length_input():
     side = ' Side: pro'
     with pytest.raises(InvalidStartMessage, match='must be less than 100 characters'):
         parse_topic_side(topic + side)
+
+
+def test_parser_rejects_message_over_120_chars():
+    # Construimos un mensaje de más de 120 caracteres
+    long_message = 'a' * 121
+    with pytest.raises(
+        InvalidContinuationMessage, match='must be less than 120 characters'
+    ):
+        assert_no_topic_or_side_markers(long_message)
+
+
+def test_parser_accepts_message_under_120_chars():
+    # Construimos un mensaje de menos de 120 caracteres
+    message = 'I think dogs are better than cats because they provide partnership.'
+    # No debe lanzar excepción
+    assert assert_no_topic_or_side_markers(message) is None
