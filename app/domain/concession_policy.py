@@ -37,7 +37,11 @@ class DebateState:
     lang_locked: bool = False  # once True, never auto-change
 
     end_reason: str = ''
-    ended_by: str = ''  # e.g. 'judge', 'policy:max_turns', 'policy:points'
+    last_reason: str = ''  # last judge reason (snake_case)
+
+    @property
+    def debate_status(self) -> DebateStatus:
+        return 'ENDED' if self.match_concluded else 'ONGOING'
 
     def maybe_conclude(self) -> bool:
         """
@@ -67,11 +71,14 @@ class DebateState:
         (If your prompt previously used USER_POINT/USER_POINT_REASON, remove them.)
         """
         return {
-            'STANCE': self.stance.value,  # "pro" | "con"
+            'STANCE': self.stance,  # "pro" | "con"
             'DEBATE_STATUS': self.debate_status,  # "ONGOING" | "ENDED"
             'TURN_INDEX': str(self.assistant_turns),
             'LANGUAGE': self.lang,  # e.g., "en"
             'TOPIC': self.topic,
+            'END_REASON': self.end_reason
+            or self.last_reason
+            or 'policy_threshold_reached',
         }
 
     # Handy for logging/debugging

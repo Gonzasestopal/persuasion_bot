@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Dict
 
 
 @dataclass
@@ -13,9 +14,8 @@ class TopicResult:
 @dataclass
 class JudgeResult:
     accept: bool
-    ended: bool
     reason: str  # short snake_case reason from the judge
-    assistant_reply: (
-        str  # the assistant's next turn (language-locked, ≤80 words, 1 question)
-    )
     confidence: float  # 0..1
+    metrics: Dict[
+        str, float
+    ]  # optional detail: {"defended_contra":0.72,"defended_ent":0.22,"max_sent_contra":0.81}

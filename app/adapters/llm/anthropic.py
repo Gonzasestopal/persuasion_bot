@@ -5,7 +5,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
 from anthropic import AsyncAnthropic
 
 from app.adapters.llm.constants import (
-    JUDGE_SYSTEM_PROMPT,
+    AWARE_SYSTEM_PROMPT,
+    JUDGE_SCORE_SYSTEM_PROMPT,
     MEDIUM_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TOPIC_CHECKER_SYSTEM_PROMPT,
@@ -90,6 +91,12 @@ class AnthropicAdapter(LLMPort):
     async def debate(self, messages: List[Message]) -> str:
         mapped = self._map_history(messages)
         return await self._request(messages=mapped, system=self.system_prompt)
+
+    async def debate_aware(self, messages: List[Message], state) -> str:
+        # Build the system from state vars (needs DebateState.to_prompt_vars())
+        sys = AWARE_SYSTEM_PROMPT.format(**state.to_prompt_vars())
+        mapped = self._map_history(messages)
+        return await self._request(messages=mapped, system=sys)
 
     def _topic_gate_system_prompt(self, topic, stance) -> str:
         # Keep this tiny and strict; output must be a single line.
@@ -209,80 +216,60 @@ class AnthropicAdapter(LLMPort):
 
     async def nli_judge(self, *, payload: Jsonable) -> JudgeResult:
         """
-        Calls the judge with the NLI payload and returns a structured JudgeResult:
-        - accept: bool
-        - ended: bool
-        - reason: str
-        - assistant_reply: str
-        - confidence: float (0..1)
-        Raises ValueError on invalid responses.
+        Score-only judge. Expects ONE-LINE JSON:
+          {"accept":true|false,"confidence":0..1,"reason":"snake_case", "metrics":{...optional...}}
+        No assistant_reply. No ended flag (server decides end).
         """
         user_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
-
-        logger.debug('[nli_judge] sending payload=%s', user_text)
+        logger.debug('[nli_score] sending payload=%s', user_text)
 
         resp = await self.client.messages.create(
             model=self.model,
-            system=JUDGE_SYSTEM_PROMPT,
+            system=JUDGE_SCORE_SYSTEM_PROMPT,  # <- score-only prompt
             messages=[
-                {
-                    'role': 'user',
-                    'content': [{'type': 'text', 'text': user_text}],
-                }
+                {'role': 'user', 'content': [{'type': 'text', 'text': user_text}]}
             ],
             temperature=0.0,
-            max_tokens=220,
+            max_tokens=160,
         )
-
         out = self._parse_single_text(resp).strip()
-        logger.debug('[nli_judge] raw LLM output=%r', out)
+        logger.debug('[nli_score] raw LLM output=%r', out)
 
         try:
             obj = json.loads(out)
         except json.JSONDecodeError as e:
-            logger.error('[nli_judge] JSON decode failed: %s | output=%r', e, out)
+            logger.error('[nli_score] JSON decode failed: %s | output=%r', e, out)
             raise ValueError(f'LLM judge returned non-JSON: {out!r}') from e
 
         if not isinstance(obj, dict):
-            logger.error('[nli_judge] Expected dict, got %s', type(obj))
-            raise ValueError('LLM judge: non-object JSON')
+            raise ValueError('LLM score: non-object JSON')
 
-        if 'assistant_reply' not in obj or 'reason' not in obj:
-            logger.error('[nli_judge] Missing required fields in obj=%s', obj)
-            raise ValueError('LLM judge: missing assistant_reply or reason')
-
+        # Minimal required fields
         accept = bool(obj.get('accept', False))
-        ended = bool(obj.get('ended', False))
         reason = str(obj.get('reason') or '')
-        assistant_reply = str(obj.get('assistant_reply') or '')
         try:
             confidence = float(obj.get('confidence', 0.0))
         except (TypeError, ValueError):
-            logger.warning(
-                '[nli_judge] Invalid confidence value=%s, defaulting to 0.0',
-                obj.get('confidence'),
-            )
             confidence = 0.0
 
-        if not assistant_reply or not reason:
-            logger.error('[nli_judge] Empty assistant_reply or reason in obj=%s', obj)
-            raise ValueError('LLM judge: empty assistant_reply or reason')
-        if confidence < 0.0 or confidence > 1.0:
-            logger.warning('[nli_judge] Confidence out of range: %s', confidence)
+        # Optional extras (ignore if missing)
+        metrics = obj.get('metrics') if isinstance(obj.get('metrics'), dict) else None
+
+        if not reason:
+            raise ValueError('LLM score: missing reason')
+        if not (0.0 <= confidence <= 1.0):
             confidence = max(0.0, min(1.0, confidence))
 
         result = JudgeResult(
             accept=accept,
-            ended=ended,
-            reason=reason,
-            assistant_reply=assistant_reply,
             confidence=confidence,
+            reason=reason,
+            metrics=metrics,
         )
 
         logger.debug(
-            '[nli_judge] parsed JudgeResult: accept=%s ended=%s reason=%s conf=%.2f',
+            '[nli_judge] parsed JudgeResult: accept=%s reason=%s conf=%.2f',
             result.accept,
-            result.ended,
             result.reason,
             result.confidence,
         )

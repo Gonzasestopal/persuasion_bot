@@ -64,6 +64,7 @@ class OpenAIAdapter(LLMPort):
             TURN_INDEX=state.assistant_turns,
             LANGUAGE=state.lang,
             TOPIC=state.topic,
+            END_REASON=state.end_reason,
         )
 
     def _build_user_msg(self, topic: str, stance: Stance) -> str:
@@ -99,6 +100,13 @@ class OpenAIAdapter(LLMPort):
             {'role': ('assistant' if m.role == 'bot' else 'user'), 'content': m.message}
             for m in messages
         ]
+
+    async def debate_aware(self, messages: List[Message], state: DebateState) -> str:
+        # Build the system from state vars (needs DebateState.to_prompt_vars())
+        system_prompt = AWARE_SYSTEM_PROMPT.format(**state.to_prompt_vars())
+        mapped = self._map_history(messages)
+        input_msgs = [{'role': 'system', 'content': system_prompt}, *mapped]
+        return self._request(input_msgs)
 
     async def debate(self, messages: List[Message], state: DebateState) -> str:
         system_prompt = self._render_system_prompt(state)
