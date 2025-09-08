@@ -2,7 +2,7 @@ import re
 import string
 from typing import List
 
-from app.utils.text import STOP_ALL, trunc
+from app.utils.text import STOP_ALL
 
 
 class NoveltyGuard:

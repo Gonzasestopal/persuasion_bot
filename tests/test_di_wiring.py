@@ -4,7 +4,7 @@ import pytest
 from app.domain.parser import parse_topic_side
 from app.infra.service import get_concession_singleton, get_service
 from app.services.concession_service import ConcessionService
-from app.services.message_service import MessageService
+from app.services.debate_orchestrator import MessageService
 
 pytestmark = pytest.mark.unit
 

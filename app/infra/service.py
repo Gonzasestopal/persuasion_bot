@@ -12,7 +12,7 @@ from app.infra.llm import (
 )
 from app.infra.nli import get_nli_singleton
 from app.services.concession_service import ConcessionService
-from app.services.message_service import MessageService
+from app.services.debate_orchestrator import MessageService
 
 
 def get_concession_singleton(

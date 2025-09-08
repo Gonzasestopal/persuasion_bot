@@ -33,7 +33,7 @@ def service():
         parse_topic_side,
     )  # adjust if your parser lives elsewhere
     from app.services.concession_service import ConcessionService
-    from app.services.message_service import MessageService
+    from app.services.debate_orchestrator import MessageService
     from app.settings import settings
 
     repo = InMemoryMessageRepo()
@@ -68,7 +68,6 @@ def service():
     concession_service = ConcessionService(
         llm=llm,
         nli=nli,
-        debate_store=debate_store,
         judge=judge,
     )
 

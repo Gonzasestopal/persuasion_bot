@@ -56,7 +56,11 @@ async def test_novelty_guard_blocks_duplicate_accept(service):
 
     # First analyze: should increment positives -> 1
     _ = await service.concession_service.analyze_conversation(
-        messages=messages_round1, stance=stance, conversation_id=conv_id, topic=topic
+        messages=messages_round1,
+        stance=stance,
+        conversation_id=conv_id,
+        topic=topic,
+        state=state,
     )
     st1 = service.debate_store.get(conv_id)
     assert st1.positive_judgements == 1
@@ -64,7 +68,11 @@ async def test_novelty_guard_blocks_duplicate_accept(service):
     # Second analyze with an **exact duplicate** user turn
     messages_round2 = messages_round1 + [Message(role='user', message=u1)]
     _ = await service.concession_service.analyze_conversation(
-        messages=messages_round2, stance=stance, conversation_id=conv_id, topic=topic
+        messages=messages_round2,
+        stance=stance,
+        conversation_id=conv_id,
+        topic=topic,
+        state=state,
     )
     st2 = service.debate_store.get(conv_id)
 
@@ -104,7 +112,11 @@ async def test_novelty_guard_allows_new_argument(service):
 
     # First ACCEPT -> positives = 1
     _ = await service.concession_service.analyze_conversation(
-        messages=messages_round1, stance=stance, conversation_id=conv_id, topic=topic
+        messages=messages_round1,
+        stance=stance,
+        conversation_id=conv_id,
+        topic=topic,
+        state=state,
     )
     st1 = service.debate_store.get(conv_id)
     assert st1.positive_judgements == 1
@@ -121,7 +133,11 @@ async def test_novelty_guard_allows_new_argument(service):
     ]
 
     _ = await service.concession_service.analyze_conversation(
-        messages=messages_round2, stance=stance, conversation_id=conv_id, topic=topic
+        messages=messages_round2,
+        stance=stance,
+        conversation_id=conv_id,
+        topic=topic,
+        state=state,
     )
     st2 = service.debate_store.get(conv_id)
     assert st2.positive_judgements == 2, (

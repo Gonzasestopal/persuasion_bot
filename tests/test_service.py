@@ -8,7 +8,7 @@ from app.domain.concession_policy import DebateState
 from app.domain.errors import ConversationExpired, ConversationNotFound, InvalidTopic
 from app.domain.models import Conversation, Message
 from app.services.concession_service import ConcessionService
-from app.services.message_service import MessageService
+from app.services.debate_orchestrator import MessageService
 
 pytestmark = pytest.mark.unit
 
@@ -259,14 +259,8 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
 
 @pytest.mark.asyncio
 async def test_continue_conversation_loads_and_saves_state_calls_concession(
-    repo, llm, debate_store
+    repo, llm, debate_store, nli, judge
 ):
-    """
-    Persists via MessageService:
-      - loads state with debate_store.get
-      - delegates to ConcessionService.analyze_conversation(state=...)
-      - saves returned updated_state with debate_store.save
-    """
     # Conversation present and not expired
     future = datetime.now(timezone.utc) + timedelta(minutes=20)
     conversation = Conversation(
@@ -274,25 +268,25 @@ async def test_continue_conversation_loads_and_saves_state_calls_concession(
     )
     repo.get_conversation.return_value = conversation
 
-    # History the service will hand over
+    # History handed over to ConcessionService
     repo.all_messages.return_value = [
         Message(role='user', message='Topic: God exists. Side: CON.'),
         Message(role='bot', message='previous bot'),
     ]
 
-    # Provide an initial state and make .get return it
+    # Returned in the final service response (IMPORTANT: set BEFORE Act)
+    repo.last_messages.return_value = [
+        Message(role='user', message='user follow-up'),
+        Message(role='bot', message='assistant reply'),
+    ]
+
+    # Initial debate state
     state = DebateState(stance='con', topic='God exists', lang='en')
     debate_store.get.return_value = state
 
-    # Stub ConcessionService to new signature -> returns (reply, updated_state)
-    cs = ConcessionService(
-        nli=nli,
-        judge=judge,
-        llm=llm,
-    )
-    cs.analyze_conversation = AsyncMock(
-        return_value=('assistant reply', state)  # echo same state for simplicity
-    )
+    # ConcessionService stub returns (reply, updated_state)
+    cs = ConcessionService(nli=nli, judge=judge, llm=llm)
+    cs.analyze_conversation = AsyncMock(return_value=('assistant reply', state))
 
     svc = MessageService(
         parser=Mock(),  # not used on continue
@@ -306,12 +300,12 @@ async def test_continue_conversation_loads_and_saves_state_calls_concession(
     # Act
     out = await svc.continue_conversation(message='user follow-up', conversation_id=7)
 
-    # Assert persistence & delegation
+    # Assert: state load/save and delegation
     debate_store.get.assert_called_once_with(7)
     cs.analyze_conversation.assert_awaited_once()
     debate_store.save.assert_called_once_with(conversation_id=7, state=state)
 
-    # Bot reply written
+    # Assert: messages written
     repo.add_message.assert_has_awaits(
         [
             call(conversation_id=7, role='user', text='user follow-up'),
@@ -319,5 +313,7 @@ async def test_continue_conversation_loads_and_saves_state_calls_concession(
         ]
     )
 
+    # Assert: response shape
     assert out['conversation_id'] == 7
     assert isinstance(out['message'], list)
+    assert out['message'] == repo.last_messages.return_value
