@@ -39,6 +39,15 @@ class DebateState:
     end_reason: str = ''
     last_reason: str = ''  # last judge reason (snake_case)
 
+    last_judge_accept: bool = False
+    last_judge_reason_label: str = (
+        ''  # snake_case from judge, e.g. "on_topic_clear_contradiction"
+    )
+    last_judge_confidence: float = 0.0  # 0..1
+
+    # UI flags
+    show_telemetry: bool = True  # if True, show banner in replies
+
     @property
     def debate_status(self) -> DebateStatus:
         return 'ENDED' if self.match_concluded else 'ONGOING'
@@ -58,27 +67,30 @@ class DebateState:
             return True
         return False
 
-    # ---------- Mutation helpers ----------
-    def mark_concluded(self, *, reason: str, by: str) -> None:
+    def mark_concluded(self) -> None:
         self.match_concluded = True
-        self.end_reason = reason
-        self.ended_by = by
+
+    def set_judge(self, *, accept: bool, reason: str, confidence: float) -> None:
+        self.last_judge_accept = bool(accept)
+        self.last_judge_reason_label = (reason or '').strip()
+        try:
+            self.last_judge_confidence = float(confidence)
+        except Exception:
+            self.last_judge_confidence = 0.0
 
     # ---------- Prompt wiring ----------
     def to_prompt_vars(self) -> Dict[str, str]:
-        """
-        Map state to placeholders consumed by your AWARE system prompt.
-        (If your prompt previously used USER_POINT/USER_POINT_REASON, remove them.)
-        """
         return {
             'STANCE': self.stance,  # "pro" | "con"
             'DEBATE_STATUS': self.debate_status,  # "ONGOING" | "ENDED"
             'TURN_INDEX': str(self.assistant_turns),
-            'LANGUAGE': self.lang,  # e.g., "en"
+            'LANGUAGE': self.lang,
             'TOPIC': self.topic,
-            'END_REASON': self.end_reason
-            or self.last_reason
-            or 'policy_threshold_reached',
+            # pass judge info raw — debate prompt will humanize it
+            'JUDGE_ACCEPT': 'true' if self.last_judge_accept else 'false',
+            'JUDGE_REASON_LABEL': self.last_judge_reason_label,
+            'JUDGE_CONFIDENCE': f'{self.last_judge_confidence:.2f}',
+            'END_REASON': self.end_reason or self.last_judge_reason_label or '',
         }
 
     # Handy for logging/debugging

@@ -57,15 +57,7 @@ class OpenAIAdapter(LLMPort):
         if state is None:
             raise ValueError('DebateState is required, got None')
 
-        debate_status = 'ENDED' if state.match_concluded else 'ONGOING'
-        return AWARE_SYSTEM_PROMPT.format(
-            STANCE=state.stance.upper(),
-            DEBATE_STATUS=debate_status,
-            TURN_INDEX=state.assistant_turns,
-            LANGUAGE=state.lang,
-            TOPIC=state.topic,
-            END_REASON=state.end_reason,
-        )
+        return AWARE_SYSTEM_PROMPT.format(**state.to_prompt_vars())
 
     def _build_user_msg(self, topic: str, stance: Stance) -> str:
         return (
