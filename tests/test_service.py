@@ -1,4 +1,3 @@
-# tests/unit/test_message_service_topic_gate.py
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
@@ -8,6 +7,7 @@ import pytest
 from app.domain.concession_policy import DebateState
 from app.domain.errors import InvalidTopic
 from app.domain.models import Conversation, Message
+from app.services.concession_service import ConcessionService
 from app.services.message_service import MessageService
 
 pytestmark = pytest.mark.unit
@@ -27,7 +27,6 @@ class CheckerResult:
         self.normalized_stance = normalized_stance
 
     def __bool__(self):
-        # Allow truthiness checks if any legacy code does `if result:`
         return self.is_valid
 
 
@@ -53,22 +52,40 @@ def llm():
 
 @pytest.fixture
 def debate_store():
-    # Minimal store; the state object only needs fields touched by start_conversation
+    # State only needs fields touched by start_conversation
     return SimpleNamespace(
         create=Mock(return_value=DebateState(stance='con', topic='X', lang='en')),
         save=Mock(),
     )
 
 
+# NUEVO: fixtures para dependencias requeridas por MessageService
+@pytest.fixture
+def nli():
+    # No se usa en estos tests, puede ser un namespace vacío o con métodos ficticios
+    return SimpleNamespace(
+        analyze=AsyncMock(return_value={}),  # opcional
+    )
+
+
+@pytest.fixture
+def judge():
+    # start_conversation no lo usa, pero igual proveemos una firma coherente
+    fake_judge_result = SimpleNamespace(
+        accept=False, ended=False, reason='init', assistant_reply='', confidence=0.0
+    )
+    return SimpleNamespace(nli_judge=AsyncMock(return_value=fake_judge_result))
+
+
 @pytest.mark.asyncio
 async def test_start_conversation_invalid_topic_raises_invalidtopic(
-    repo, llm, debate_store
+    repo, llm, debate_store, nli, judge
 ):
     """
-    When topic_checker reports INVALID, MessageService must:
-      - await topic_checker.check_topic(message, stance)
-      - raise InvalidTopic
-      - NOT create a conversation or call the LLM
+    If topic_checker returns INVALID:
+      - MessageService raises InvalidTopic
+      - No conversation is created
+      - LLM isn't called
     """
     parser = Mock(return_value=('X', 'con'))
     topic_checker = SimpleNamespace(
@@ -77,25 +94,28 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
         )
     )
 
+    cs = ConcessionService(
+        nli=nli,
+        judge=judge,
+        llm=llm,
+        debate_store=debate_store,
+    )
+
     svc = MessageService(
         parser=parser,
         repo=repo,
         llm=llm,
         debate_store=debate_store,
         topic_checker=topic_checker,
+        concession_service=cs,
     )
 
     user_msg = 'Topic: X. Side: CON.'
     with pytest.raises(InvalidTopic):
         await svc.handle(message=user_msg)
 
-    # Parser used to extract (topic, stance)
     parser.assert_called_once_with(user_msg)
-
-    # Topic checker consulted with (message, stance)
     topic_checker.check_topic.assert_awaited_once_with('X', 'con')
-
-    # No downstream work
     repo.create_conversation.assert_not_called()
     llm.generate.assert_not_awaited()
     repo.add_message.assert_not_awaited()
@@ -103,10 +123,12 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
 
 
 @pytest.mark.asyncio
-async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_store):
+async def test_start_conversation_valid_topic_flows_normally(
+    repo, llm, debate_store, nli, judge
+):
     """
-    When topic_checker reports VALID, normal start flow proceeds
-    with normalized topic (and original stance if no normalized_stance provided).
+    VALID topic → creates conversation with normalized topic and normalized_stance,
+    writes user & bot messages, returns last messages.
     """
     parser = Mock(return_value=('God exists', 'con'))
     topic_checker = SimpleNamespace(
@@ -128,9 +150,17 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
         Message(role='bot', message='bot reply'),
     ]
 
+    cs = ConcessionService(
+        nli=nli,
+        judge=judge,
+        llm=llm,
+        debate_store=debate_store,
+    )
+
     svc = MessageService(
         parser=parser,
         repo=repo,
+        concession_service=cs,
         llm=llm,
         debate_store=debate_store,
         topic_checker=topic_checker,
@@ -140,13 +170,8 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
     user_msg = 'Topic: God exists. Side: CON.'
     out = await svc.handle(message=user_msg)
 
-    # Topic checker used with (message, stance)
     topic_checker.check_topic.assert_awaited_once_with('God exists', 'con')
-
-    # Conversation created with normalized topic and original stance
     repo.create_conversation.assert_awaited_once_with(topic='God exists', stance='con')
-
-    # LLM and repo writes happened
     llm.generate.assert_awaited_once()
     repo.add_message.assert_has_awaits(
         [
@@ -166,11 +191,11 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
 
 @pytest.mark.asyncio
 async def test_start_conversation_uses_normalized_stance_if_provided(
-    repo, llm, debate_store
+    repo, llm, debate_store, nli, judge
 ):
     """
-    If the topic checker provides a normalized_stance, the service should use it
-    when creating the conversation (e.g., mapping synonyms or canonical forms).
+    If checker provides normalized_stance, service uses it verbatim in create_conversation
+    and in DebateState initialization.
     """
     parser = Mock(return_value=('X', 'con'))  # user asked for CON
     topic_checker = SimpleNamespace(
@@ -179,7 +204,7 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
                 True,
                 reason='',
                 normalized='God exists',
-                normalized_stance='pro',  # force a different canonical stance
+                normalized_stance='pro',  # canonical stance differs from input
             )
         )
     )
@@ -192,14 +217,18 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
         Message(role='bot', message='bot reply'),
     ]
 
-    # Modify MessageService to actually use normalized_stance if present.
-    # If you've already updated the service to:
-    #   stance_to_use = clean_topic.normalized_stance or stance
-    # this test will pass.
+    cs = ConcessionService(
+        nli=nli,
+        judge=judge,
+        llm=llm,
+        debate_store=debate_store,
+    )
+
     svc = MessageService(
         parser=parser,
         repo=repo,
         llm=llm,
+        concession_service=cs,
         debate_store=debate_store,
         topic_checker=topic_checker,
         history_limit=5,
@@ -208,13 +237,8 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
     user_msg = 'Topic: X. Side: CON.'
     out = await svc.handle(message=user_msg)
 
-    # Topic checker called with (message, stance)
     topic_checker.check_topic.assert_awaited_once_with('X', 'con')
-
-    # Conversation created using normalized topic AND normalized stance
     repo.create_conversation.assert_awaited_once_with(topic='God exists', stance='pro')
-
-    # LLM invoked and messages written
     llm.generate.assert_awaited_once()
     repo.add_message.assert_has_awaits(
         [

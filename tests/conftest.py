@@ -56,10 +56,20 @@ def service():
     else:
         llm = DummyLLMAdapter()
 
+    if os.environ.get('ANTHROPIC_API_KEY'):
+        judge = AnthropicAdapter(
+            api_key=settings.ANTHROPIC_API_KEY,
+            model=settings.LLM_MODEL,
+            temperature=0.3,
+        )
+    else:
+        judge = DummyLLMAdapter()
+
     concession_service = ConcessionService(
         llm=llm,
         nli=nli,
         debate_store=debate_store,
+        judge=judge,
     )
 
     return MessageService(

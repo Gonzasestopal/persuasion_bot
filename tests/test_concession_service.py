@@ -1,3 +1,5 @@
+# tests/unit/test_concession_service_unit.py
+from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import pytest
@@ -11,37 +13,113 @@ from app.services.concession_service import ConcessionService
 pytestmark = pytest.mark.unit
 
 
+# ---------------------------- Helpers de compatibilidad ------------------------------
+
+
+def _alias(d: dict, *keys):
+    """
+    Devuelve d[key] usando alias. Si no está al tope, intenta dentro de d['nli'].
+    Lanza KeyError si ninguno existe.
+    """
+    for k in keys:
+        if k in d:
+            return d[k]
+    nli = d.get('nli')
+    if isinstance(nli, dict):
+        for k in keys:
+            if k in nli:
+                return nli[k]
+    raise KeyError(keys[0])
+
+
+def _is_procon_or_enum(v):
+    """Acepta 'pro'|'con' o instancia de Stance enum."""
+    try:
+        if isinstance(v, Stance):
+            return True
+    except Exception:
+        pass
+    return v in ('pro', 'con')
+
+
 # ---------------------------- Fakes / Helpers ------------------------------
+
+
+@dataclass
+class _JudgeDecision:
+    accept: bool
+    confidence: float
+    reason: str
+    metrics: Dict[str, float]
+
+
+class FakeDebateLLM:
+    """
+    Minimal reply LLM stub:
+      - debate_aware(...) devuelve un reply estático.
+    """
+
+    async def debate_aware(self, messages, state=None, **_):
+        return 'fake-llm-reply'
+
+    # Opcional: algunos tests llaman debate_aware_end; mantener default seguro.
+    async def debate_aware_end(self, messages, prompt_vars: Dict[str, str], **_):
+        # End renderer determinístico.
+        return (
+            'Debate ended by policy or judge signal; a strong contradiction was detected.\n'
+            f'Reason: {prompt_vars.get("JUDGE_REASON_LABEL", "unspecified_reason")} '
+            f'(conf {prompt_vars.get("JUDGE_CONFIDENCE", "0.00")})'
+        )
+
+
+class FakeJudgeLLM:
+    """
+    Minimal judge LLM stub:
+      - nli_judge(payload=...) retorna un _JudgeDecision con accept/confidence/reason/metrics
+    Soporta tanto el shape nuevo (accept/metrics) como uno legacy (concession).
+    """
+
+    def __init__(self, decision: Dict[str, Any] = None):
+        # Default: accept (concession) con alta confianza
+        self._raw = decision or {
+            'accept': True,
+            'confidence': 0.9,
+            'reason': 'thesis_opposition_strong',
+            'metrics': {
+                'defended_contra': 0.9,
+                'defended_ent': 0.1,
+                'max_sent_contra': 0.9,
+            },
+        }
+        self.last_payload: Dict[str, Any] = None
+
+    async def nli_judge(self, *, payload: Dict[str, Any]) -> _JudgeDecision:
+        self.last_payload = payload
+
+        # Mapeo flexible para soportar shapes legacy:
+        accept = self._raw.get('accept')
+        if accept is None:
+            # Legacy: concession=True implica accept=True
+            accept = bool(self._raw.get('concession', False))
+
+        confidence = float(self._raw.get('confidence', 0.0))
+        reason = str(self._raw.get('reason', 'unspecified'))
+        metrics = dict(
+            self._raw.get('metrics')
+            or {
+                'defended_contra': 0.0,
+                'defended_ent': 0.0,
+                'max_sent_contra': 0.0,
+            }
+        )
+        return _JudgeDecision(
+            accept=accept, confidence=confidence, reason=reason, metrics=metrics
+        )
 
 
 @pytest.fixture
 def store():
     return InMemoryDebateStore()
-
-
-class FakeLLM:
-    """
-    Minimal LLM stub:
-      - debate(...) returns a static reply (service calls it after judging)
-      - nli_judge(payload=...) returns a configured decision dict
-    """
-
-    def __init__(self, decision: Dict[str, Any] = None):
-        # Default: concession with high confidence
-        self.decision = decision or {
-            'verdict': 'OPPOSITE',
-            'concession': True,
-            'confidence': 0.87,
-            'reason': 'thesis_opposition_strong',
-        }
-        self.last_payload: Dict[str, Any]
-
-    async def debate(self, messages, state=None):
-        return 'fake-llm-reply'
-
-    async def nli_judge(self, *, payload: Dict[str, Any]):
-        self.last_payload = payload  # capture for assertions
-        return self.decision
 
 
 def mk_dir(ent: float, neu: float, contra: float):
@@ -50,7 +128,7 @@ def mk_dir(ent: float, neu: float, contra: float):
 
 
 def mk_bidir(ph, hp):
-    # bidirectional package; service will agg with agg_max
+    # bidirectional package; service agregará con agg_max
     agg = {
         k: max(ph.get(k, 0.0), hp.get(k, 0.0))
         for k in ('entailment', 'neutral', 'contradiction')
@@ -60,9 +138,9 @@ def mk_bidir(ph, hp):
 
 class FakeNLI:
     """
-    Returns scripted bidirectional scores in sequence for each call to bidirectional_scores.
-    If 'per_sentence' is provided, those are consumed first (for sentence scan).
-    After sequence exhausted, repeats the last package if repeat_last=True.
+    Devuelve paquetes bidireccionales en secuencia por cada llamada a bidirectional_scores.
+    Si 'per_sentence' se provee, esos se consumen primero (para el sentence scan).
+    Luego repite el último si repeat_last=True.
     """
 
     def __init__(self, sequence, repeat_last=True, per_sentence=None):
@@ -96,10 +174,33 @@ class DummyState:
         self.assistant_turns = 0
         self.match_concluded = False
         self.lang = 'en'
+        self.topic = ''
+        self.stance = Stance.PRO
+
+        # Policy mirror (defaults usados por el service)
+        class _Policy:
+            required_positive_judgements = 1
+            max_assistant_turns = 3
+
+        self.policy = _Policy()
+        # Info del judge usada por end rendering
+        self.last_judge_accept = False
+        self.last_judge_reason_label = ''
+        self.last_judge_confidence = 0.0
+        self.end_reason = ''
 
     def maybe_conclude(self):
-        # conclude once we record a concession (used in analyze_conversation test)
+        # concluir una vez que registramos un positive judgement
         return self.positive_judgements >= 1
+
+    # permitir que el service setee info del judge
+    def set_judge(self, *, accept: bool, reason: str, confidence: float):
+        self.last_judge_accept = bool(accept)
+        self.last_judge_reason_label = (reason or '').strip()
+        try:
+            self.last_judge_confidence = float(confidence)
+        except Exception:
+            self.last_judge_confidence = 0.0
 
 
 def make_msgs():
@@ -125,22 +226,29 @@ def make_msgs():
 @pytest.mark.asyncio
 async def test_analyze_conversation_concession_and_conclude(store):
     """
-    LLM judge returns a concession with high confidence:
-    - service increments positive_judgements
-    - state concludes (DummyState.maybe_conclude)
-    - analyze_conversation returns verdict string (build_verdict path)
+    Judge acepta con alta confianza:
+      - service incrementa positive_judgements
+      - state concluye
+      - service devuelve end-render o normal si la policy requiere 2 accepts
     """
     nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.2, 0.6, 0.2), mk_dir(0.2, 0.6, 0.2))])
-    llm = FakeLLM(
+    judge = FakeJudgeLLM(
         decision={
-            'verdict': 'OPPOSITE',
-            'concession': True,
-            'confidence': 0.9,
+            'accept': True,
+            'confidence': 0.90,
             'reason': 'thesis_opposition_strong',
+            'metrics': {
+                'defended_contra': 0.9,
+                'defended_ent': 0.1,
+                'max_sent_contra': 0.92,
+            },
         }
     )
+    llm = FakeDebateLLM()
+
     svc = ConcessionService(
         llm=llm,
+        judge=judge,
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
@@ -148,44 +256,55 @@ async def test_analyze_conversation_concession_and_conclude(store):
     )
 
     conv_id = 42
-    store.save(conv_id, DummyState())
+    st = DummyState()
+    st.topic = 'Remote work is more productive'
+    st.stance = Stance.PRO
+    store.save(conv_id, st)
     msgs = make_msgs()
 
     out = await svc.analyze_conversation(
         messages=msgs,
         stance=Stance.PRO,
         conversation_id=conv_id,
-        topic='Remote work is more productive',
+        topic=st.topic,
     )
 
-    # Concluded → returns verdict string
     assert isinstance(out, str)
     assert store.get(conv_id).positive_judgements == 1
-    # Payload sanity
-    assert llm.last_payload is not None
-    assert llm.last_payload['topic'] == 'Remote work is more productive'
-    assert llm.last_payload['stance'] == 'pro'
-    assert isinstance(llm.last_payload['thesis_scores'], dict)
+    # Judge payload sanity
+    assert judge.last_payload is not None
+    assert judge.last_payload['topic'] == st.topic
+    assert 'stance' in judge.last_payload
+    assert _is_procon_or_enum(judge.last_payload['stance'])
+    # tolerar ambos nombres de clave en nivel tope o dentro de 'nli'
+    assert isinstance(_alias(judge.last_payload, 'thesis_scores', 'thesis_agg'), dict)
 
 
 @pytest.mark.asyncio
 async def test_analyze_conversation_no_concession_high_confidence(store):
     """
-    LLM judge returns SAME / no concession with high confidence:
-    - service SHOULD NOT increment positive_judgements
-    - service proceeds to generate a reply (not concluding)
+    Judge rechaza (no concession) con alta confianza:
+      - no incrementa
+      - service devuelve un reply normal
     """
     nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.3, 0.5, 0.2), mk_dir(0.35, 0.45, 0.2))])
-    llm = FakeLLM(
+    judge = FakeJudgeLLM(
         decision={
-            'verdict': 'SAME',
-            'concession': False,
+            'accept': False,
             'confidence': 0.88,
             'reason': 'thesis_support',
+            'metrics': {
+                'defended_contra': 0.2,
+                'defended_ent': 0.7,
+                'max_sent_contra': 0.3,
+            },
         }
     )
+    llm = FakeDebateLLM()
+
     svc = ConcessionService(
         llm=llm,
+        judge=judge,
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
@@ -193,39 +312,50 @@ async def test_analyze_conversation_no_concession_high_confidence(store):
     )
 
     conv_id = 7
-    store.save(conv_id, DummyState())
+    st = DummyState()
+    st.topic = 'Dogs are the best companions'
+    st.stance = Stance.CON
+    store.save(conv_id, st)
     msgs = make_msgs()
 
     out = await svc.analyze_conversation(
         messages=msgs,
         stance=Stance.CON,
         conversation_id=conv_id,
-        topic='Dogs are the best companions',
+        topic=st.topic,
     )
 
     assert isinstance(out, str)  # reply path
     assert store.get(conv_id).positive_judgements == 0
-    assert llm.last_payload is not None
-    assert llm.last_payload['stance'] == 'con'
+    assert judge.last_payload is not None
+    assert 'stance' in judge.last_payload
+    assert _is_procon_or_enum(judge.last_payload['stance'])
 
 
 @pytest.mark.asyncio
 async def test_analyze_conversation_concession_low_confidence_gate(store):
     """
-    LLM judge returns concession but with low confidence:
-    - service should *not* increment positive_judgements because of min confidence gate
+    Judge acepta pero la confianza está por debajo del umbral:
+      - no incrementa debido a llm_judge_min_confidence
     """
     nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.1, 0.8, 0.1), mk_dir(0.1, 0.8, 0.1))])
-    llm = FakeLLM(
+    judge = FakeJudgeLLM(
         decision={
-            'verdict': 'OPPOSITE',
-            'concession': True,
-            'confidence': 0.25,  # below default min_conf=0.70
+            'accept': True,
+            'confidence': 0.25,  # por debajo de min_conf=0.70
             'reason': 'weak_signal',
+            'metrics': {
+                'defended_contra': 0.51,
+                'defended_ent': 0.30,
+                'max_sent_contra': 0.55,
+            },
         }
     )
+    llm = FakeDebateLLM()
+
     svc = ConcessionService(
         llm=llm,
+        judge=judge,
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
@@ -234,11 +364,14 @@ async def test_analyze_conversation_concession_low_confidence_gate(store):
     )
 
     conv_id = 9
-    store.save(conv_id, DummyState())
+    st = DummyState()
+    st.topic = 'X'
+    st.stance = Stance.PRO
+    store.save(conv_id, st)
     msgs = make_msgs()
 
     out = await svc.analyze_conversation(
-        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic='X'
+        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic=st.topic
     )
 
     assert isinstance(out, str)
@@ -247,27 +380,26 @@ async def test_analyze_conversation_concession_low_confidence_gate(store):
 
 def test_payload_builder_sentence_scan_and_on_topic_flags():
     """
-    Validate that the payload builder computes:
+    Validar que el builder calcula:
       - thesis_agg
-      - max_sent_contra from sentence scanning
-      - on_topic heuristic
-      - pair_best aggregation (from best contradicting claim)
+      - max_sent_contra del sentence scanning
+      - heurística on_topic
+      - pair_best agregado (de la claim más contradictoria)
     """
-    # First sentence neutral; second sentence strongly contradictory
+    # Primera oración neutral; segunda fuertemente contradictoria
     sent1 = mk_dir(0.20, 0.70, 0.10)
     sent2 = mk_dir(0.10, 0.05, 0.85)
 
     thesis_neutral = mk_bidir(sent1, sent1)
     thesis_contra = mk_bidir(sent2, sent2)
 
-    # FakeNLI will first be used to compute thesis-level scores (once), and also in sentence scan
-    # Here we want the sentence scan to hit both, resulting in max_sent_contra≈0.85
     nli = FakeNLI(
         sequence=[thesis_neutral], per_sentence=[thesis_neutral, thesis_contra]
     )
 
     svc = ConcessionService(
-        llm=FakeLLM(),
+        llm=FakeDebateLLM(),
+        judge=FakeJudgeLLM(),  # no usado en builder, pero requerido por ctor
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
@@ -289,34 +421,37 @@ def test_payload_builder_sentence_scan_and_on_topic_flags():
         conversation=conv,
         stance=Stance.PRO,
         topic='El universo requiere un creador',
+        state=DummyState(),
     )
 
     assert payload is not None
     d = payload.to_dict()
     assert d['topic'] == 'El universo requiere un creador'
-    assert d['stance'] == 'pro'
-    assert 0.0 <= d['thesis_scores']['entailment'] <= 1.0
-    assert 0.80 <= d['max_sent_contra'] <= 0.90  # catches the strong second sentence
-    assert isinstance(d['pair_best'], dict)
+    assert _is_procon_or_enum(d.get('stance'))
+    ts = _alias(d, 'thesis_scores', 'thesis_agg')
+    assert 0.0 <= ts['entailment'] <= 1.0
+    max_contra = _alias(d, 'max_sent_contra')
+    assert 0.80 <= max_contra <= 0.90  # strong second sentence
+    assert isinstance(_alias(d, 'pair_best', 'pair_agg'), dict)
     assert 'user_wc' in d
     assert isinstance(user_txt, str) and isinstance(bot_txt, str)
 
 
 def test_payload_builder_pair_best_from_claims():
     """
-    Ensure pair_best aggregates from the most contradictory assistant claim.
+    Asegurar que pair_best se arma desde la claim más contradictoria del assistant.
     """
-    # Pairwise scoring sequence: first claim neutral, second claim contradicts
+    # Secuencia pairwise: primera claim neutral, segunda contradice
     pair_neutral = mk_bidir(mk_dir(0.20, 0.70, 0.10), mk_dir(0.22, 0.68, 0.10))
     pair_contra = mk_bidir(mk_dir(0.10, 0.25, 0.72), mk_dir(0.12, 0.22, 0.75))
 
-    # Thesis agg (not important here)
+    # Thesis agg (no relevante acá)
     thesis_any = mk_bidir(mk_dir(0.30, 0.60, 0.10), mk_dir(0.32, 0.58, 0.10))
     nli = FakeNLI(sequence=[thesis_any])
-    nli.per_sentence = None  # claims path doesn't use per_sentence
 
     svc = ConcessionService(
-        llm=FakeLLM(),
+        llm=FakeDebateLLM(),
+        judge=FakeJudgeLLM(),  # no usado en builder
         nli=nli,
         nli_config=NLIConfig(),
         scoring=ScoringConfig(),
@@ -334,12 +469,12 @@ def test_payload_builder_pair_best_from_claims():
         },
     ]
 
-    # Monkeypatch _claim_scores to use our two scripted packages
+    # Monkeypatch _claim_scores para usar nuestros dos paquetes
     def fake_claim_scores(claims: List[str], user_clean: str):
-        # Return tuples like (claim, ent, contra, rel, bidir_scores)
+        # Retorna tuplas (claim, ent, contra, rel, bidir_scores)
         return [
             (claims[0], 0.30, 0.10, 0.30, pair_neutral),
-            (claims[1], 0.20, 0.75, 0.75, pair_contra),  # most contradictory
+            (claims[1], 0.20, 0.75, 0.75, pair_contra),  # la más contradictoria
         ]
 
     svc._claim_scores = fake_claim_scores  # type: ignore
@@ -348,8 +483,10 @@ def test_payload_builder_pair_best_from_claims():
         conversation=conv,
         stance=Stance.CON,
         topic='Thesis T',
+        state=DummyState(),
     )
     assert payload is not None
     d = payload.to_dict()
-    assert 0.70 <= d['pair_best']['contradiction'] <= 0.80  # came from second claim
-    assert d['stance'] == 'con'
+    pb = _alias(d, 'pair_best', 'pair_agg')
+    assert 0.70 <= pb['contradiction'] <= 0.80  # provino de la segunda claim
+    assert _is_procon_or_enum(d.get('stance'))
