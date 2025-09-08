@@ -23,7 +23,7 @@ class LLMPort(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def check_topic(self, topic: str) -> str:
+    async def check_topic(self, topic: str, stance: str) -> str:
         """
         Given a topic return if its coherent or not
         """

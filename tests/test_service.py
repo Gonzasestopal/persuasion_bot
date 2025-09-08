@@ -16,6 +16,7 @@ class CheckerResult:
     def __init__(self, is_valid: bool, reason: str = ''):
         self.is_valid = is_valid
         self.reason = reason
+        self.normalized = 'God exists'
 
     def __bool__(self):
         return self.is_valid
@@ -55,7 +56,7 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
 ):
     parser = Mock(return_value=('X', 'con'))
     topic_checker = SimpleNamespace(
-        check_topic=Mock(return_value=CheckerResult(False, reason='gibberish'))
+        check_topic=AsyncMock(return_value=CheckerResult(False, reason='gibberish'))
     )
 
     svc = MessageService(
@@ -80,14 +81,15 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
 
 @pytest.mark.asyncio
 async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_store):
-    parser = Mock(return_value=('X', 'con'))
-    topic_checker = SimpleNamespace(check_topic=Mock(return_value=CheckerResult(True)))
-
+    parser = Mock(return_value=('God exists', 'con'))
+    topic_checker = SimpleNamespace(
+        check_topic=AsyncMock(return_value=CheckerResult(True, reason='gibberish'))
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
-    conv = Conversation(id=42, topic='X', stance='con', expires_at=expires_at)
+    conv = Conversation(id=42, topic='God exists', stance='con', expires_at=expires_at)
     repo.create_conversation.return_value = conv
     repo.last_messages.return_value = [
-        Message(role='user', message='Topic: X. Side: CON.'),
+        Message(role='user', message='Topic: God exists. Side: CON.'),
         Message(role='bot', message='bot reply'),
     ]
 
@@ -100,21 +102,21 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
         history_limit=5,
     )
 
-    out = await svc.handle(message='Topic: X. Side: CON.')
+    out = await svc.handle(message='Topic: God exists. Side: CON.')
 
     topic_checker.check_topic.assert_called_once()
-    repo.create_conversation.assert_awaited_once_with(topic='X', stance='con')
+    repo.create_conversation.assert_awaited_once_with(topic='God exists', stance='con')
     llm.generate.assert_awaited_once()
     repo.add_message.assert_has_awaits(
         [
-            call(conversation_id=42, role='user', text='Topic: X. Side: CON.'),
+            call(conversation_id=42, role='user', text='Topic: God exists. Side: CON.'),
             call(conversation_id=42, role='bot', text='bot reply'),
         ]
     )
     assert out == {
         'conversation_id': 42,
         'message': [
-            Message(role='user', message='Topic: X. Side: CON.'),
+            Message(role='user', message='Topic: God exists. Side: CON.'),
             Message(role='bot', message='bot reply'),
         ],
     }

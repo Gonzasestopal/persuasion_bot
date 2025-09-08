@@ -35,17 +35,17 @@ async def test_topic_normalizer_valid_en_double_negation_normalizes_anthropic():
     )
 
     topic = 'I don’t think God does not exist'
-    res = await adapter.check_topic(topic, language='en')
+    res = await adapter.check_topic(topic, stance='God exists')
 
-    assert res['is_valid'] == 'true'
-    assert isinstance(res['normalized'], str) and res['normalized'].strip()
-    assert _norm_upper(res['normalized']) in {'GOD EXISTS'}, (
-        f'Unexpected normalization: {res["normalized"]} (raw={res["raw"]})'
+    assert res.is_valid == True
+    assert isinstance(res.normalized, str) and res.normalized.strip()
+    assert _norm_upper(res.normalized) in {'GOD EXISTS'}, (
+        f'Unexpected normalization: {res.normalized} (raw={res.raw})'
     )
 
-    assert res['reason'] == ''
-    assert _norm_upper(res['raw']).startswith('VALID:')
-    assert '\n' not in res['raw']
+    assert res.reason == ''
+    assert 'VALID' in _norm_upper(res.raw)
+    assert '\n' not in res.raw
 
 
 @requires_key
@@ -61,11 +61,11 @@ async def test_topic_normalizer_invalid_es_one_liner_anthropic():
     )
 
     topic = 'hola'
-    res = await adapter.check_topic(topic, language='es')
+    res = await adapter.check_topic(topic, stance='God exists')
 
-    assert res['is_valid'] == 'false'
-    assert res['normalized'] is None
-    raw_up = _norm_upper(res['raw'])
+    assert res.is_valid == False
+    assert res.normalized is None
+    raw_up = _norm_upper(res.raw)
 
     assert raw_up.startswith('INVALID:')
     assert 'NO ES UN TEMA LISTO PARA DEBATE' in raw_up
@@ -88,9 +88,9 @@ async def test_topic_normalizer_valid_minimal_claim_round_trip_anthropic():
     )
 
     topic = 'Climate change is real'
-    res = await adapter.check_topic(topic, language='en')
+    res = await adapter.check_topic(topic, stance='God exists')
 
-    assert res['is_valid'] == 'true'
-    assert _norm_upper(res['normalized']) == 'CLIMATE CHANGE IS REAL'
-    assert _norm_upper(res['raw']).startswith('VALID:')
-    assert '\n' not in res['raw']
+    assert res.is_valid == True
+    assert _norm_upper(res.normalized) == 'CLIMATE CHANGE IS REAL'
+    assert 'VALID' in _norm_upper(res.raw)
+    assert '\n' not in res.raw

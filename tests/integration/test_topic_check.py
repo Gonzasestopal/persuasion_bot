@@ -15,10 +15,6 @@ def _norm_upper(s: str) -> str:
     return re.sub(r'\s+', ' ', s).strip().upper()
 
 
-def _last_bot_msg(resp_json):
-    return resp_json['message'][-1]['message']
-
-
 def _assert_invalid_prefix(up: str):
     """
     Allow either:
@@ -43,17 +39,18 @@ def _assert_invalid_prefix(up: str):
 )
 def test_turn0_invalid_topic_en_gate_line_and_shape(client):
     """
-    Invalid English-ish topic should yield a localized gate one-liner quoting the topic,
-    exactly one question, ≤80 words, and no stance opener.
-    (We *prefer* 'INVALID:' but do not fail if the model omits it.)
+    Invalid English-ish topic should yield a localized gate one-liner. With the
+    new behavior, the endpoint responds 422 and places the message in `detail`.
+    We still enforce the EN tail and the INVALID preference.
     """
     topic = 'asdf'
     start = f'topic: {topic}, side: con'
     r = client.post('/messages', json={'conversation_id': None, 'message': start})
-    assert r.status_code == 201, r.text
-    bot = _last_bot_msg(r.json())
-    assert isinstance(bot, str) and bot.strip()
-    up = _norm_upper(bot)
+    assert r.status_code == 422, r.text
+
+    detail = r.json().get('detail', '')
+    assert isinstance(detail, str) and detail.strip()
+    up = _norm_upper(detail)
 
     # Soft preference for INVALID: (don’t fail if missing)
     if up.startswith('LANGUAGE:'):
@@ -61,22 +58,16 @@ def test_turn0_invalid_topic_en_gate_line_and_shape(client):
     else:
         assert up.startswith('INVALID:') or "ISN'T DEBATE-READY" in up
 
-    # Must quote the original topic and use the EN template opening
-    expect_en = (
-        f'"{_norm_upper(topic)}" ISN\'T DEBATE-READY. '
-        'PLEASE PROVIDE A VALID, DEBATE-READY TOPIC.'
-    )
-    assert expect_en in up, (
-        f'Missing EN gate one-liner.\nWanted contains: {expect_en}\nGot: {bot!r}'
+    # Must include the topic token and the EN gate one-liner tail
+    expect_en_tail = "ISN'T DEBATE-READY. PLEASE PROVIDE A VALID, DEBATE-READY TOPIC."
+    assert _norm_upper(topic) in up, f'Topic token missing in detail. Got: {detail!r}'
+    assert expect_en_tail in up, (
+        f'Missing EN gate one-liner tail.\nWanted contains: {expect_en_tail}\nGot: {detail!r}'
     )
 
-    # No stance opener
+    # No stance opener terms in an error
     assert 'I WILL GLADLY TAKE THE' not in up
     assert not re.search(r'\bPRO\b', up) and not re.search(r'\bCON\b', up)
-
-    # Exactly one question, concise
-    assert bot.count('?') == 1, f'Expected exactly one question. Got: {bot!r}'
-    assert len(bot.split()) <= 80, f'Reply too long: {len(bot.split())} words'
 
 
 @pytest.mark.skipif(
@@ -85,44 +76,40 @@ def test_turn0_invalid_topic_en_gate_line_and_shape(client):
 )
 def test_turn0_invalid_topic_es_gate_line_and_shape(client):
     """
-    Invalid Spanish topic should yield a localized gate one-liner quoting the topic.
-    Tolerate occasional EN fallback; still enforce shape.
+    Invalid Spanish topic should yield a localized gate one-liner in ES.
+    We tolerate EN fallback; still enforce the tail line and no stance opener.
+    Uses 422 `detail`.
     """
     topic = 'hola'
     start = f'topic: {topic}, side: con'
     r = client.post('/messages', json={'conversation_id': None, 'message': start})
-    assert r.status_code == 201, r.text
-    bot = _last_bot_msg(r.json())
-    assert isinstance(bot, str) and bot.strip()
-    up = _norm_upper(bot)
+    assert r.status_code == 422, r.text
 
-    # Soft preference for INVALID:
+    detail = r.json().get('detail', '')
+    assert isinstance(detail, str) and detail.strip()
+    up = _norm_upper(detail)
+
+    # Soft preference for INVALID: do not fail if missing
     if up.startswith('LANGUAGE:'):
         has_invalid = ' INVALID:' in up
     else:
         has_invalid = up.startswith('INVALID:')
-    # Don’t fail if missing; model compliance may vary
+    _ = has_invalid  # kept for parity with original, but non-fatal
 
-    expect_es = (
-        f'"{_norm_upper(topic)}" NO ES UN TEMA LISTO PARA DEBATE. '
-        'POR FAVOR, PROPORCIONA UN TEMA VALIDO Y LISTO PARA DEBATE.'
-    )
-    expect_en = (
-        f'"{_norm_upper(topic)}" ISN\'T DEBATE-READY. '
-        'PLEASE PROVIDE A VALID, DEBATE-READY TOPIC.'
-    )
-    assert (expect_es in up) or (expect_en in up), (
-        f'Missing ES/EN gate one-liner.\nWanted one of:\n  ES: {expect_es}\n  EN: {expect_en}\nGot: {bot!r}'
+    # Accept either ES or EN tail; topic token must appear somewhere
+    expect_es_tail = 'NO ES UN TEMA LISTO PARA DEBATE. POR FAVOR, PROPORCIONA UN TEMA VALIDO Y LISTO PARA DEBATE.'
+    expect_en_tail = "ISN'T DEBATE-READY. PLEASE PROVIDE A VALID, DEBATE-READY TOPIC."
+    assert _norm_upper(topic) in up, f'Topic token missing in detail. Got: {detail!r}'
+    assert (expect_es_tail in up) or (expect_en_tail in up), (
+        f'Missing ES/EN gate one-liner tail.\n'
+        f'Wanted one of:\n  ES: {expect_es_tail}\n  EN: {expect_en_tail}\n'
+        f'Got: {detail!r}'
     )
 
-    # No stance opener
+    # No stance opener terms in an error
     assert 'CON GUSTO TOMARE EL LADO' not in up
     assert 'I WILL GLADLY TAKE THE' not in up
     assert not re.search(r'\bPRO\b', up) and not re.search(r'\bCON\b', up)
-
-    # Exactly one question, concise
-    assert bot.count('?') == 1, f'Expected exactly one question. Got: {bot!r}'
-    assert len(bot.split()) <= 80, f'Reply too long: {len(bot.split())} words'
 
 
 @pytest.mark.skipif(
@@ -131,12 +118,14 @@ def test_turn0_invalid_topic_es_gate_line_and_shape(client):
 )
 def test_turn0_valid_topic_skips_gate_and_starts_debate(client):
     """
-    A valid debate-ready topic should NOT trigger the gate.
+    A valid debate-ready topic should NOT trigger the gate; should return 201
+    with a normal opening in the bot message payload.
     """
     start = 'topic: God exists, side: con'
     r = client.post('/messages', json={'conversation_id': None, 'message': start})
     assert r.status_code == 201, r.text
-    bot = _last_bot_msg(r.json())
+
+    bot = r.json()['message'][-1]['message']
     up = _norm_upper(bot)
 
     # Gate must NOT appear

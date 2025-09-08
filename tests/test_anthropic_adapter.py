@@ -42,7 +42,7 @@ def test_adapter_config_defaults():
     assert adapter.client is client
     assert adapter.temperature == 0.3
     assert adapter.max_output_tokens == 120
-    assert adapter.model in {'claude-3-5-sonnet-latest'}
+    assert adapter.model in {'claude-sonnet-4-20250514'}
 
 
 @pytest.mark.asyncio
@@ -143,24 +143,30 @@ async def test_adapter_debate_maps_roles_and_respects_history():
 @pytest.mark.asyncio
 async def test_check_topic_valid_calls_anthropic_and_parses_true():
     calls = []
-    client = FakeAsyncAnthropic(calls, output_text='VALID')
+    output_text = (
+        '{"status":"VALID","lang":"en",'
+        '"topic_raw":"God exists","topic_normalized":"God exists",'
+        '"polarity_raw":"pos","polarity_normalized":"pos",'
+        '"stance_requested":"pro","stance_final":"pro"}'
+    )
+    client = FakeAsyncAnthropic(calls, output_text=output_text)
     adapter = AnthropicAdapter(
         api_key='sk-test', client=client, model='claude-3-5-sonnet-latest'
     )
 
-    result = await adapter.check_topic('God exists', language='en')
+    result = await adapter.check_topic('God exists', 'pro')
 
     # Parsed result
-    assert result['is_valid'] == 'true'
-    assert result['reason'] == ''
-    assert result['raw'] == 'VALID'
+    assert result.is_valid == True
+    assert result.reason == ''
+    assert 'VALID' in result.raw
 
     # Exactly one Anthropic call with expected params
     assert len(calls) == 1
     sent = calls[0]
     assert sent['model'] == 'claude-3-5-sonnet-latest'
     assert sent['temperature'] == 0.0
-    assert sent['max_tokens'] <= 8
+    assert sent['max_tokens'] <= 120
 
     msgs = sent['messages']
     assert isinstance(msgs, list) and len(msgs) == 1
@@ -177,18 +183,18 @@ async def test_check_topic_invalid_calls_anthropic_and_parses_false():
         api_key='sk-test', client=client, model='claude-3-5-sonnet-latest'
     )
 
-    result = await adapter.check_topic('hello', language='en')
+    result = await adapter.check_topic('hello', 'pro')
 
     # Parsed result
-    assert result['is_valid'] == 'false'
-    assert 'greeting' in result['reason']
-    assert result['raw'].startswith('INVALID')
+    assert result.is_valid == False
+    assert 'greeting' in result.reason
+    assert result.raw.startswith('INVALID')
 
     # Call shape
     assert len(calls) == 1
     sent = calls[0]
     assert sent['temperature'] == 0.0
-    assert sent['max_tokens'] <= 8
+    assert sent['max_tokens'] <= 120
 
     msgs = sent['messages']
     assert msgs[0]['role'] == 'user'

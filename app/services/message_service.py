@@ -42,7 +42,7 @@ class MessageService(object):
         return await self.continue_conversation(message, conversation_id)
 
     async def start_conversation(self, topic: str, stance: Stance, message: str = None):
-        clean_topic = await self.topic_checker.check_topic(message)
+        clean_topic = await self.topic_checker.check_topic(message, stance)
 
         if not clean_topic.is_valid:
             raise InvalidTopic(message=clean_topic.reason)

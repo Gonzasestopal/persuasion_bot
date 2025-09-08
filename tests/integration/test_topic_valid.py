@@ -90,7 +90,7 @@ def test_turn0_trivial_topic_en_shows_valid_topic_prompt(client):
     topic = 'hello'
     start = f'Topic: {topic}. Side: PRO.'
     r1 = client.post('/messages', json={'conversation_id': None, 'message': start})
-    assert r1.status_code == 201, r1.text
+    assert r1.status_code == 422, r1.text
     bot = _last_bot_msg(r1.json())
     assert isinstance(bot, str) and bot.strip()
     assert_language(bot, 'en')
@@ -134,7 +134,7 @@ def test_turn0_gibberish_topic_es_shows_valid_topic_prompt(client):
     topic = 'no se'
     start = f'topic: {topic}. side: CON.'
     r1 = client.post('/messages', json={'conversation_id': None, 'message': start})
-    assert r1.status_code == 201, r1.text
+    assert r1.status_code == 422, r1.text
     bot = _last_bot_msg(r1.json())
     assert isinstance(bot, str) and bot.strip()
     assert_language(bot, 'es')
