@@ -122,10 +122,13 @@ class ConcessionService:
             agg_sig = build_score_signal(rs)
             scoring_system_msg = make_scoring_system_message(ctx_sig, agg_sig)
 
+        stance_tag = f'<STANCE side="{stance}" topic="{topic}"/>'
+
         # LLM sees signals as an extra system message; MUST NOT show to user
         reply = await self.llm.debate(
             messages=messages,
             scoring_system_msg=scoring_system_msg,
+            stance_system_msg=stance_tag,
         )
         return reply.strip()
 

@@ -12,6 +12,7 @@ class LLMPort:
         self,
         messages: List[Message],
         *,
+        stance_system_msg: Optional[str] = None,  # <-- NEW
         scoring_system_msg: Optional[str] = None,  # hidden <SCORING>{...}</SCORING>
     ) -> str:
         raise NotImplementedError

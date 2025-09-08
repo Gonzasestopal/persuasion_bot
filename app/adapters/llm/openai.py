@@ -67,6 +67,7 @@ class OpenAIAdapter(LLMPort):
         messages: List[Message],
         *,
         scoring_system_msg: Optional[str] = None,  # hidden system message
+        stance_system_msg: Optional[str] = None,  # <-- NEW
     ) -> str:
         mapped = self._map_history(messages)
 
@@ -74,6 +75,8 @@ class OpenAIAdapter(LLMPort):
         if scoring_system_msg:
             # separate system message with hidden telemetry
             input_msgs.append({'role': 'system', 'content': scoring_system_msg})
+        if stance_system_msg:
+            input_msgs.append({'role': 'system', 'content': stance_system_msg})
         input_msgs.extend(mapped)
 
         reply = self._request(input_msgs)
