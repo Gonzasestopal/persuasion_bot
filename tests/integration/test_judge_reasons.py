@@ -11,23 +11,37 @@ from app.domain.nli.reasons import JudgeReason
 pytestmark = pytest.mark.integration
 
 
+# tests/integration/test_judge_reasons.py  (only the fakes section needs this shape)
+
+
+class _FakeContentBlock:
+    def __init__(self, text: str):
+        self.type = 'text'
+        self.text = text
+
+
+class _FakeAnthropicResponse:
+    def __init__(self, text: str):
+        # Mimic Anthropic SDK: resp.content -> [ ContentBlock(...).text ]
+        self.content = [_FakeContentBlock(text)]
+
+
 class _FakeMessages:
     def __init__(self, output_text: str):
         self.output_text = output_text
         self.calls = []
 
     async def create(self, *args, **kwargs):
-        # record the call for optional inspection
         self.calls.append((args, kwargs))
-        # Shape expected by AnthropicAdapter._parse_single_text:
-        # resp["content"][0]["text"] (with a type)
-        return {'content': [{'type': 'text', 'text': self.output_text}]}
+        # Must return an object with .content[0].text
+        return _FakeAnthropicResponse(self.output_text)
 
 
 class FakeAsyncAnthropic:
     """
-    Minimal fake matching Anthropic client surface that the adapter uses:
-      self.client.messages.create(...)
+    Minimal surface your adapter uses:
+        await client.messages.create(...)
+    returning an object whose .content[0].text is the one-line JSON.
     """
 
     def __init__(self, output_text: str):

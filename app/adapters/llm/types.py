@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict
 
+from app.domain.nli.reasons import JudgeReason
+
 
 @dataclass
 class TopicResult:
@@ -14,7 +16,7 @@ class TopicResult:
 @dataclass
 class JudgeResult:
     accept: bool
-    reason: str  # short snake_case reason from the judge
+    reason: JudgeReason  # short snake_case reason from the judge
     confidence: float  # 0..1
     metrics: Dict[
         str, float

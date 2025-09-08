@@ -17,6 +17,7 @@ from app.adapters.llm.constants import (
 from app.adapters.llm.types import JudgeResult, TopicResult
 from app.domain.enums import Stance
 from app.domain.models import Conversation, Message
+from app.domain.nli.reasons import ALIASES, ALLOWED_REASONS, JudgeReason
 from app.domain.ports.llm import LLMPort
 
 Jsonable = Union[Dict[str, Any], Mapping[str, Any]]
@@ -332,7 +333,10 @@ class AnthropicAdapter(LLMPort):
 
         # Minimal required fields
         accept = bool(obj.get('accept', False))
-        reason = str(obj.get('reason') or '')
+        raw_reason = str(obj.get('reason') or '')
+        reason = ALIASES.get(raw_reason, raw_reason)
+        if reason not in ALLOWED_REASONS:
+            reason = 'ambiguous_evidence'  # fallback seguro, o lanza ValueError si prefieres endurecer
         try:
             confidence = float(obj.get('confidence', 0.0))
         except (TypeError, ValueError):
@@ -349,7 +353,7 @@ class AnthropicAdapter(LLMPort):
         result = JudgeResult(
             accept=accept,
             confidence=confidence,
-            reason=reason,
+            reason=JudgeReason(reason),
             metrics=metrics,
         )
 

@@ -308,13 +308,32 @@ Input JSON:
   "progress": {"positive_judgements": integer, "assistant_turns": integer}
 }
 
-Decision (deterministic):
+Deterministic decision:
 - ACCEPT iff nli.on_topic is true AND contradiction vs the defended thesis is clearly stronger than entailment
   (consider both thesis_scores and max_sent_contra); otherwise REJECT.
 - Be conservative when user_wc is tiny unless contradiction is extremely high.
 
-Output — ONE LINE JSON ONLY:
-{"accept":true|false,"confidence":0..1,"reason":"<short_snake_case>","metrics":{"defended_contra":0.xx,"defended_ent":0.xx,"max_sent_contra":0.xx}}
+Allowed reasons (MUST choose exactly one of these strings):
+[
+  "user_defends_pro_thesis",        # user explicitly supports the defended thesis
+  "user_defends_con_thesis",        # user explicitly attacks the defended thesis
+  "strict_thesis_contradiction",    # strong contradiction vs thesis (meets strict threshold)
+  "ambiguous_evidence",             # evidence is weak/mixed; cannot conclude
+  "off_topic",                      # user's message is off-topic
+  "policy_turn_limit",              # closing due to turn-limit policy
+  "positive_judgements_reached"     # policy satisfied: enough positive judgements
+]
+
+Guidance:
+- If the user is clearly supporting the defended thesis → reason="user_defends_pro_thesis", accept=false.
+- If the user is clearly attacking the defended thesis with strong contradiction → reason="strict_thesis_contradiction", accept=true.
+- If signals are mixed/weak → reason="ambiguous_evidence", accept=false.
+- If off-topic → reason="off_topic", accept=false.
+- If closing due to policy (turns) → reason="policy_turn_limit", accept=false, and set ended if your policy entails closure.
+- If policy says to end because positives were reached → reason="positive_judgements_reached", accept=true, and ended=true.
+
+Output — ONE LINE JSON ONLY (no extra text, no trailing comments):
+{"accept":true|false,"confidence":0..1,"reason":"<one_of_allowed_strings>","metrics":{"defended_contra":0.xx,"defended_ent":0.xx,"max_sent_contra":0.xx},"ended":true|false}
 """
 
 

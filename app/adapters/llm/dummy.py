@@ -3,6 +3,7 @@ from typing import List
 from app.adapters.llm.types import JudgeResult
 from app.domain.concession_policy import DebateState
 from app.domain.models import Conversation, Message
+from app.domain.nli.reasons import JudgeReason
 from app.domain.ports.llm import LLMPort
 
 
@@ -21,5 +22,5 @@ class DummyLLMAdapter(LLMPort):
             verdict='OPPOSITE',
             concession=True,
             confidence=0.87,
-            reason='thesis_opposition_strong',
+            reason=JudgeReason.STRICT_THESIS_CONTRADICTION,
         )
