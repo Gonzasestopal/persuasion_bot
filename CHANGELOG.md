@@ -1,3 +1,24 @@
+## v1.10.0 (2025-09-08)
+
+### Feat
+
+- end condition
+- concession service uses nli judge
+- llm nli judge agent
+- use normalized stance
+- normalized stance from message
+- include topic checker in service
+
+### Fix
+
+- correct some weird stance transforming
+
+### Refactor
+
+- make test pass
+- make test pass
+- consider new payload from topic checker
+
 ## v1.9.0 (2025-09-07)
 
 ### Feat
