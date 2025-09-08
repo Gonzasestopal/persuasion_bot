@@ -1,491 +1,637 @@
-# tests/unit/test_concession_service_unit.py
-from dataclasses import dataclass
-from typing import Any, Dict, List
+# app/services/concession_service.py
+import logging
+import re
+import string
+from dataclasses import asdict
+from typing import Dict, List, Optional, Tuple, Union
 
-import pytest
-
-from app.adapters.repositories.memory_debate_store import InMemoryDebateStore
+from app.domain.concession_policy import DebateState
 from app.domain.enums import Stance
+from app.domain.mappings import END_REASON_MAP
+from app.domain.models import Message
 from app.domain.nli.config import NLIConfig
+from app.domain.nli.judge_payload import NLIJudgePayload
 from app.domain.nli.scoring import ScoringConfig
-from app.services.concession_service import ConcessionService
+from app.domain.ports.debate_store import DebateStorePort
+from app.domain.ports.llm import LLMPort
+from app.domain.ports.nli import NLIPort
+from app.nli.ops import agg_max
+from app.utils.text import (
+    ACK_PREFIXES,
+    STANCE_BANNERS,
+    STOP_ALL,
+    drop_questions,
+    looks_like_question,
+    normalize_spaces,
+    round3,
+    sanitize_end_markers,
+    strip_trailing_fragment,
+    trunc,
+    word_count,
+)
 
-pytestmark = pytest.mark.unit
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
-# ---------------------------- Helpers de compatibilidad ------------------------------
-
-
-def _alias(d: dict, *keys):
+class ConcessionService:
     """
-    Devuelve d[key] usando alias. Si no está al tope, intenta dentro de d['nli'].
-    Lanza KeyError si ninguno existe.
-    """
-    for k in keys:
-        if k in d:
-            return d[k]
-    nli = d.get('nli')
-    if isinstance(nli, dict):
-        for k in keys:
-            if k in nli:
-                return nli[k]
-    raise KeyError(keys[0])
-
-
-def _is_procon_or_enum(v):
-    """Acepta 'pro'|'con' o instancia de Stance enum."""
-    try:
-        if isinstance(v, Stance):
-            return True
-    except Exception:
-        pass
-    return v in ('pro', 'con')
-
-
-# ---------------------------- Fakes / Helpers ------------------------------
-
-
-@dataclass
-class _JudgeDecision:
-    accept: bool
-    confidence: float
-    reason: str
-    metrics: Dict[str, float]
-
-
-class FakeDebateLLM:
-    """
-    Minimal reply LLM stub:
-      - debate_aware(...) devuelve un reply estático.
+    Flow:
+      1) Build NLI evidence payload from conversation.
+      2) Call judge.nli_judge(...) → {accept, confidence, reason, ...}.
+      3) Tally accepts and decide if debate ends (projected on THIS reply).
+      4) Ask the LLM to write the visible reply. If ENDED, call the end-only renderer.
     """
 
-    async def debate_aware(self, messages, state=None, **_):
-        return 'fake-llm-reply'
+    def __init__(
+        self,
+        llm: LLMPort,
+        nli: Optional[NLIPort] = None,  # ← now optional (BC)
+        judge: Optional[LLMPort] = None,  # ← now optional (BC)
+        debate_store: Optional[DebateStorePort] = None,  # ← optional (BC)
+        nli_config: Optional[NLIConfig] = None,
+        scoring: Optional[ScoringConfig] = None,
+        *,
+        llm_judge_min_confidence: float = 0.70,
+    ) -> None:
+        self.llm = llm
+        self.nli = nli
+        self.judge = judge
+        self.debate_store = debate_store
+        self.nli_config = nli_config or NLIConfig()
+        self.scoring = scoring or ScoringConfig()
+        self.llm_judge_min_confidence = float(llm_judge_min_confidence)
 
-    # Opcional: algunos tests llaman debate_aware_end; mantener default seguro.
-    async def debate_aware_end(self, messages, prompt_vars: Dict[str, str], **_):
-        # End renderer determinístico.
-        return (
-            'Debate ended by policy or judge signal; a strong contradiction was detected.\n'
-            f'Reason: {prompt_vars.get("JUDGE_REASON_LABEL", "unspecified_reason")} '
-            f'(conf {prompt_vars.get("JUDGE_CONFIDENCE", "0.00")})'
+    # ----------------------------- public API -----------------------------
+    async def analyze_conversation(
+        self,
+        messages: List[Message],
+        stance: Stance,
+        conversation_id: Optional[int] = None,  # ← optional (legacy path)
+        topic: Optional[str] = None,
+        state: Optional[DebateState] = None,  # ← new pure path
+    ) -> Union[str, Tuple[str, DebateState]]:
+        """
+        Backward-compatible API:
+        - Legacy path (tests expecting str): provide conversation_id (+store). State is loaded/saved; returns str.
+        - New pure path (tests expecting tuple): provide `state` directly; returns (reply, state).
+        """
+        # ---------- Resolve state (BC with store) ----------
+        if state is None:
+            if self.debate_store is not None and conversation_id is not None:
+                state = self.debate_store.get(conversation_id)
+                if state is None:
+                    raise RuntimeError(
+                        f'DebateState missing for conversation_id={conversation_id}'
+                    )
+            else:
+                raise RuntimeError(
+                    'State must be provided when no debate_store/conversation_id are given'
+                )
+
+        # Sync assistant turns from transcript to avoid drift
+        turns_in_transcript = self._count_assistant_turns(messages)
+        if state.assistant_turns != turns_in_transcript:
+            logger.debug(
+                '[sync] correcting assistant_turns: state=%d -> transcript=%d',
+                state.assistant_turns,
+                turns_in_transcript,
+            )
+            state.assistant_turns = turns_in_transcript
+
+        topic_clean: str = (topic or state.topic or '').strip()
+        if not topic_clean:
+            logger.debug('[analyze] empty topic; falling back to state.topic as blank')
+
+        logger.debug(
+            '[analyze] conv_id=%s stance=%s topic=%s | turns=%d msgs=%d',
+            conversation_id,
+            state.stance,
+            trunc(topic_clean),
+            state.assistant_turns,
+            len(messages),
         )
 
+        # If already ended, render via end-only path
+        if state.match_concluded:
+            logger.debug('[analyze] already ENDED → debate_aware_end render')
+            reply_ended = await self._render_end_via_llm(messages, state)
+            reply_ended = sanitize_end_markers(reply_ended).strip()
+            # Save when using legacy path
+            if self.debate_store is not None and conversation_id is not None:
+                self.debate_store.save(conversation_id=conversation_id, state=state)
+                return reply_ended  # legacy: str
+            return reply_ended, state  # pure: tuple
 
-class FakeJudgeLLM:
-    """
-    Minimal judge LLM stub:
-      - nli_judge(payload=...) retorna un _JudgeDecision con accept/confidence/reason/metrics
-    Soporta tanto el shape nuevo (accept/metrics) como uno legacy (concession).
-    """
+        mapped = self._map_history(messages)
+        logger.debug('[analyze] mapped_history=%d', len(mapped))
 
-    def __init__(self, decision: Dict[str, Any] = None):
-        # Default: accept (concession) con alta confianza
-        self._raw = decision or {
-            'accept': True,
-            'confidence': 0.9,
-            'reason': 'thesis_opposition_strong',
-            'metrics': {
-                'defended_contra': 0.9,
-                'defended_ent': 0.1,
-                'max_sent_contra': 0.9,
-            },
-        }
-        self.last_payload: Dict[str, Any] = None
+        # ----------------------------- Judge payload (optional) -----------------------------
+        payload: Optional[NLIJudgePayload] = None
+        user_txt = bot_txt = ''
+        if self.nli is not None:
+            payload, user_txt, bot_txt = self._build_llm_judge_payload(
+                conversation=mapped,
+                stance=state.stance,
+                topic=topic_clean,
+                state=state,
+            )
+        else:
+            logger.debug('[analyze] NLI disabled; skipping judge payload build')
 
-    async def nli_judge(self, *, payload: Dict[str, Any]) -> _JudgeDecision:
-        self.last_payload = payload
+        if payload is not None and self.judge is not None:
+            try:
+                payload_dict = (
+                    payload.to_dict()
+                    if hasattr(payload, 'to_dict')
+                    else asdict(payload)
+                )
+                decision = await self.judge.nli_judge(payload=payload_dict)
 
-        # Mapeo flexible para soportar shapes legacy:
-        accept = self._raw.get('accept')
-        if accept is None:
-            # Legacy: concession=True implica accept=True
-            accept = bool(self._raw.get('concession', False))
+                # store judge outputs
+                state.set_judge(
+                    accept=decision.accept,
+                    reason=decision.reason,
+                    confidence=decision.confidence,
+                )
 
-        confidence = float(self._raw.get('confidence', 0.0))
-        reason = str(self._raw.get('reason', 'unspecified'))
-        metrics = dict(
-            self._raw.get('metrics')
-            or {
-                'defended_contra': 0.0,
-                'defended_ent': 0.0,
-                'max_sent_contra': 0.0,
-            }
+                # ----------------------------- NOVELTY GUARD APPLIED HERE -----------------------------
+                if decision.accept:
+                    novelty_min = float(getattr(self.scoring, 'novelty_min', 0.25))
+                    try:
+                        user_idx = self._last_index(mapped, role='user')
+                        novelty = (
+                            self._latest_user_novelty(mapped, user_idx)
+                            if user_idx is not None
+                            else 1.0
+                        )
+                    except Exception:
+                        novelty = 1.0  # fail-open on novelty calc
+
+                    if decision.confidence < self.llm_judge_min_confidence:
+                        logger.debug(
+                            '[judge] ACCEPT dropped by confidence gate (%.2f < %.2f) | reason=%s',
+                            decision.confidence,
+                            self.llm_judge_min_confidence,
+                            decision.reason,
+                        )
+                    elif novelty < novelty_min:
+                        # Do not count as a positive judgment if the user repeated themselves.
+                        state.set_judge(
+                            accept=False,
+                            reason='novelty_reject_duplicate',
+                            confidence=decision.confidence,
+                        )
+                        logger.debug(
+                            '[novelty] REJECT: novelty=%.3f < %.3f (duplicate/near-duplicate user turn) | user="%s"',
+                            novelty,
+                            novelty_min,
+                            trunc(user_txt, 80),
+                        )
+                    else:
+                        state.positive_judgements += 1
+                        logger.debug(
+                            "[judge] +ACCEPT (total=%s) reason=%s conf=%.2f novelty=%.3f | user='%s' | bot='%s'",
+                            state.positive_judgements,
+                            decision.reason,
+                            decision.confidence,
+                            novelty,
+                            trunc(user_txt, 80),
+                            trunc(bot_txt, 80),
+                        )
+                else:
+                    logger.debug(
+                        '[judge] REJECT reason=%s conf=%.2f',
+                        decision.reason,
+                        decision.confidence,
+                    )
+            except Exception as e:
+                logger.warning('[judge] scoring failed: %s', e)
+        else:
+            if payload is None:
+                logger.debug('[judge] skipped: insufficient context for payload')
+            if self.judge is None:
+                logger.debug('[judge] Judge disabled; skipping judge call')
+
+        # end policy (projected on THIS reply)
+        will_hit_cap_now = (
+            state.assistant_turns + 1
+        ) >= state.policy.max_assistant_turns
+        meets_positive_threshold = (
+            state.positive_judgements >= state.policy.required_positive_judgements
         )
-        return _JudgeDecision(
-            accept=accept, confidence=confidence, reason=reason, metrics=metrics
+
+        if meets_positive_threshold or will_hit_cap_now:
+            state.match_concluded = True
+            if not state.end_reason:
+                state.end_reason = state.last_judge_reason_label or (
+                    'policy_threshold_reached'
+                    if meets_positive_threshold
+                    else 'max_turns_reached'
+                )
+            logger.debug(
+                '[end] ENDED this reply | reason=%s | positives=%d/%d | turns(projected)=%d/%d',
+                state.end_reason,
+                state.policy.required_positive_judgements,
+                state.policy.required_positive_judgements,
+                state.assistant_turns + 1,
+                state.policy.max_assistant_turns,
+            )
+
+        # render
+        if state.match_concluded:
+            reply = await self._render_end_via_llm(messages, state)
+        else:
+            reply = await self.llm.debate_aware(messages=messages, state=state)
+
+        reply = sanitize_end_markers(reply).strip()
+
+        if not state.match_concluded:
+            state.assistant_turns = turns_in_transcript + 1
+
+        # ---------- Persist only in legacy path ----------
+        if self.debate_store is not None and conversation_id is not None:
+            self.debate_store.save(conversation_id=conversation_id, state=state)
+            logger.debug(
+                '[analyze] returning legacy reply (len=%d) | ended=%s',
+                len(reply),
+                state.match_concluded,
+            )
+            return reply  # legacy: str
+
+        logger.debug(
+            '[analyze] returning pure reply+state (len=%d) | ended=%s',
+            len(reply),
+            state.match_concluded,
         )
+        return reply, state  # pure: tuple
 
-
-@pytest.fixture
-def store():
-    return InMemoryDebateStore()
-
-
-def mk_dir(ent: float, neu: float, contra: float):
-    # single direction scores
-    return {'entailment': ent, 'neutral': neu, 'contradiction': contra}
-
-
-def mk_bidir(ph, hp):
-    # bidirectional package; service agregará con agg_max
-    agg = {
-        k: max(ph.get(k, 0.0), hp.get(k, 0.0))
-        for k in ('entailment', 'neutral', 'contradiction')
-    }
-    return {'p_to_h': ph, 'h_to_p': hp, 'agg_max': agg}
-
-
-class FakeNLI:
-    """
-    Devuelve paquetes bidireccionales en secuencia por cada llamada a bidirectional_scores.
-    Si 'per_sentence' se provee, esos se consumen primero (para el sentence scan).
-    Luego repite el último si repeat_last=True.
-    """
-
-    def __init__(self, sequence, repeat_last=True, per_sentence=None):
-        self.seq = list(sequence)
-        self.repeat_last = repeat_last
-        self.per_sentence = list(per_sentence) if per_sentence else None
-        self._ps_idx = 0
-        self._last_pkg = None
-
-    def bidirectional_scores(self, premise, hypothesis):
-        if self.per_sentence is not None and self._ps_idx < len(self.per_sentence):
-            pkg = self.per_sentence[self._ps_idx]
-            self._ps_idx += 1
-            self._last_pkg = pkg
-            return pkg
-
-        if self.seq:
-            pkg = self.seq.pop(0)
-            self._last_pkg = pkg
-            return pkg
-
-        if self.repeat_last and self._last_pkg is not None:
-            return self._last_pkg
-
-        raise AssertionError('FakeNLI: no more scripted scores')
-
-
-class DummyState:
-    def __init__(self):
-        self.positive_judgements = 0
-        self.assistant_turns = 0
-        self.match_concluded = False
-        self.lang = 'en'
-        self.topic = ''
-        self.stance = Stance.PRO
-
-        # Policy mirror (defaults usados por el service)
-        class _Policy:
-            required_positive_judgements = 1
-            max_assistant_turns = 3
-
-        self.policy = _Policy()
-        # Info del judge usada por end rendering
-        self.last_judge_accept = False
-        self.last_judge_reason_label = ''
-        self.last_judge_confidence = 0.0
-        self.end_reason = ''
-
-    def maybe_conclude(self):
-        # concluir una vez que registramos un positive judgement
-        return self.positive_judgements >= 1
-
-    # permitir que el service setee info del judge
-    def set_judge(self, *, accept: bool, reason: str, confidence: float):
-        self.last_judge_accept = bool(accept)
-        self.last_judge_reason_label = (reason or '').strip()
+    # ----------------------------- LLM end rendering -----------------------------
+    async def _render_end_via_llm(self, messages: List[Message], state) -> str:
+        """
+        Ask the model to render the end message itself (no server-side override).
+        Falls back to debate_aware if debate_aware_end isn't implemented.
+        """
+        prompt_vars = self._end_prompt_vars(state)
         try:
-            self.last_judge_confidence = float(confidence)
-        except Exception:
-            self.last_judge_confidence = 0.0
+            logger.debug('[render_end] using debate_aware_end | vars=%s', prompt_vars)
+            return await self.llm.debate_aware_end(
+                messages=messages,
+                prompt_vars=prompt_vars,
+                temperature=0.2,
+                max_tokens=80,
+                stop=None,
+            )
+        except AttributeError:
+            logger.debug(
+                '[render_end] debate_aware_end unavailable; falling back to debate_aware'
+            )
+            return await self.llm.debate_aware(
+                messages=messages,
+                state=state,
+                temperature=0.2,
+                max_tokens=80,
+                stop=None,
+            )
 
-
-def make_msgs():
-    class Msg:
-        def __init__(self, role, message):
-            self.role = role
-            self.message = message
-
-    bot = Msg(
-        'bot',
-        'The assistant presents a clear argument with solid evidence and several complete sentences to satisfy length.',
-    )
-    user = Msg(
-        'user',
-        'Here is the user’s sufficiently long reply that easily passes any length threshold used by the service.',
-    )
-    return [bot, user]
-
-
-# ------------------------------- Tests -------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_analyze_conversation_concession_and_conclude(store):
-    """
-    Judge acepta con alta confianza:
-      - service incrementa positive_judgements
-      - state concluye
-      - service devuelve end-render o normal si la policy requiere 2 accepts
-    """
-    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.2, 0.6, 0.2), mk_dir(0.2, 0.6, 0.2))])
-    judge = FakeJudgeLLM(
-        decision={
-            'accept': True,
-            'confidence': 0.90,
-            'reason': 'thesis_opposition_strong',
-            'metrics': {
-                'defended_contra': 0.9,
-                'defended_ent': 0.1,
-                'max_sent_contra': 0.92,
-            },
+    @staticmethod
+    def _end_prompt_vars(state) -> Dict[str, str]:
+        """
+        Build variables for END_SYSTEM_PROMPT using a single-language map.
+        """
+        reason_label = state.last_judge_reason_label or 'unspecified_reason'
+        end_reason = (
+            END_REASON_MAP.get(reason_label)
+            or state.end_reason
+            or reason_label.replace('_', ' ')
+        )
+        return {
+            'LANGUAGE': (state.lang or 'en').lower(),
+            'TOPIC': state.topic,
+            'DEBATE_STATUS': 'ENDED',
+            'END_REASON': end_reason,
+            'JUDGE_REASON_LABEL': reason_label,
+            'JUDGE_CONFIDENCE': f'{state.last_judge_confidence:.2f}',
         }
-    )
-    llm = FakeDebateLLM()
 
-    svc = ConcessionService(
-        llm=llm,
-        judge=judge,
-        nli=nli,
-        nli_config=NLIConfig(),
-        scoring=ScoringConfig(),
-        debate_store=store,
-    )
+    # ----------------------------- LLM Judge payload builder -----------------------------
+    def _build_llm_judge_payload(
+        self,
+        *,
+        conversation: List[dict],
+        stance: Stance,
+        topic: str,
+        state,
+    ) -> Tuple[Optional[NLIJudgePayload], str, str]:
+        if not conversation:
+            logger.debug('[payload] empty conversation')
+            return None, '', ''
+        if self.nli is None:
+            logger.debug('[payload] NLI disabled; returning None payload')
+            return None, '', ''
 
-    conv_id = 42
-    st = DummyState()
-    st.topic = 'Remote work is more productive'
-    st.stance = Stance.PRO
-    store.save(conv_id, st)
-    msgs = make_msgs()
+        user_idx = self._last_index(conversation, role='user')
+        if user_idx is None:
+            logger.debug('[payload] no user message found')
+            return None, '', ''
 
-    out = await svc.analyze_conversation(
-        messages=msgs,
-        stance=Stance.PRO,
-        conversation_id=conv_id,
-        topic=st.topic,
-    )
+        # min assistant words to pick a bot turn
+        min_asst_words = getattr(self.scoring, 'min_assistant_words', 8)
+        bot_idx = self._last_index(
+            conversation,
+            role='assistant',
+            predicate=lambda m: word_count(m.get('content', '')) >= min_asst_words,
+            before=user_idx,
+        )
+        if bot_idx is None:
+            logger.debug(
+                '[payload] no assistant message meeting min words=%d found',
+                min_asst_words,
+            )
+            return None, '', ''
 
-    assert isinstance(out, str)
-    assert store.get(conv_id).positive_judgements == 1
-    # Judge payload sanity
-    assert judge.last_payload is not None
-    assert judge.last_payload['topic'] == st.topic
-    assert 'stance' in judge.last_payload
-    assert _is_procon_or_enum(judge.last_payload['stance'])
-    # tolerar ambos nombres de clave en nivel tope o dentro de 'nli'
-    assert isinstance(_alias(judge.last_payload, 'thesis_scores', 'thesis_agg'), dict)
+        user_txt = conversation[user_idx]['content']
+        bot_txt = conversation[bot_idx]['content']
+        user_wc = word_count(user_txt)
+        user_clean = normalize_spaces(user_txt)
 
+        thesis = (topic or state.topic or '').strip()
+        if not thesis:
+            logger.debug('[payload] empty thesis')
+            return None, '', ''
 
-@pytest.mark.asyncio
-async def test_analyze_conversation_no_concession_high_confidence(store):
-    """
-    Judge rechaza (no concession) con alta confianza:
-      - no incrementa
-      - service devuelve un reply normal
-    """
-    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.3, 0.5, 0.2), mk_dir(0.35, 0.45, 0.2))])
-    judge = FakeJudgeLLM(
-        decision={
-            'accept': False,
-            'confidence': 0.88,
-            'reason': 'thesis_support',
-            'metrics': {
-                'defended_contra': 0.2,
-                'defended_ent': 0.7,
-                'max_sent_contra': 0.3,
+        # Thesis NLI
+        self_scores = self.nli.bidirectional_scores(thesis, user_clean)
+        thesis_agg = agg_max(self_scores)
+        on_topic = self._on_topic_from_scores(self_scores)
+        logger.debug(
+            '[payload] thesis_agg=%s | on_topic=%s', round3(thesis_agg), on_topic
+        )
+
+        # Sentence scan
+        max_sent_contra, _ent, _scores_at_max = self._max_contra_self_vs_sentences(
+            thesis, user_txt
+        )
+        logger.debug('[payload] max_sent_contra=%.3f', max_sent_contra)
+
+        # Pairwise best
+        claims = self._extract_claims(bot_txt)
+        if claims:
+            claim_scores = self._claim_scores(claims, user_clean)
+            best_claim, _ent, best_contra, best_rel, best_pair_scores = max(
+                claim_scores, key=lambda t: t[2]
+            )
+            pair_agg = agg_max(best_pair_scores)
+            logger.debug(
+                "[payload] best_claim='%s' | best_rel=%.3f best_contra=%.3f | pair_agg=%s",
+                trunc(best_claim, 80),
+                best_rel,
+                best_contra,
+                round3(pair_agg),
+            )
+        else:
+            pair_agg = {'entailment': 0.0, 'contradiction': 0.0, 'neutral': 1.0}
+            logger.debug('[payload] no claims found; using neutral pair_agg')
+
+        payload = NLIJudgePayload(
+            topic=thesis,
+            stance=stance,
+            language=state.lang,
+            turn_index=state.assistant_turns,
+            user_text=user_txt,
+            bot_text=bot_txt,
+            thesis_scores={
+                'entailment': float(thesis_agg.get('entailment', 0.0)),
+                'contradiction': float(thesis_agg.get('contradiction', 0.0)),
+                'neutral': float(thesis_agg.get('neutral', 0.0)),
             },
-        }
-    )
-    llm = FakeDebateLLM()
-
-    svc = ConcessionService(
-        llm=llm,
-        judge=judge,
-        nli=nli,
-        nli_config=NLIConfig(),
-        scoring=ScoringConfig(),
-        debate_store=store,
-    )
-
-    conv_id = 7
-    st = DummyState()
-    st.topic = 'Dogs are the best companions'
-    st.stance = Stance.CON
-    store.save(conv_id, st)
-    msgs = make_msgs()
-
-    out = await svc.analyze_conversation(
-        messages=msgs,
-        stance=Stance.CON,
-        conversation_id=conv_id,
-        topic=st.topic,
-    )
-
-    assert isinstance(out, str)  # reply path
-    assert store.get(conv_id).positive_judgements == 0
-    assert judge.last_payload is not None
-    assert 'stance' in judge.last_payload
-    assert _is_procon_or_enum(judge.last_payload['stance'])
-
-
-@pytest.mark.asyncio
-async def test_analyze_conversation_concession_low_confidence_gate(store):
-    """
-    Judge acepta pero la confianza está por debajo del umbral:
-      - no incrementa debido a llm_judge_min_confidence
-    """
-    nli = FakeNLI(sequence=[mk_bidir(mk_dir(0.1, 0.8, 0.1), mk_dir(0.1, 0.8, 0.1))])
-    judge = FakeJudgeLLM(
-        decision={
-            'accept': True,
-            'confidence': 0.25,  # por debajo de min_conf=0.70
-            'reason': 'weak_signal',
-            'metrics': {
-                'defended_contra': 0.51,
-                'defended_ent': 0.30,
-                'max_sent_contra': 0.55,
+            pair_best={
+                'entailment': float(pair_agg.get('entailment', 0.0)),
+                'contradiction': float(pair_agg.get('contradiction', 0.0)),
+                'neutral': float(pair_agg.get('neutral', 0.0)),
             },
-        }
-    )
-    llm = FakeDebateLLM()
+            max_sent_contra=float(max_sent_contra),
+            on_topic=bool(on_topic),
+            user_wc=int(user_wc),
+            policy={
+                'required_positive_judgements': state.policy.required_positive_judgements,
+                'max_assistant_turns': state.policy.max_assistant_turns,
+            },
+            progress={
+                'positive_judgements': state.positive_judgements,
+                'assistant_turns': state.assistant_turns,
+            },
+        )
+        return payload, user_txt, bot_txt
 
-    svc = ConcessionService(
-        llm=llm,
-        judge=judge,
-        nli=nli,
-        nli_config=NLIConfig(),
-        scoring=ScoringConfig(),
-        debate_store=store,
-        llm_judge_min_confidence=0.70,
-    )
-
-    conv_id = 9
-    st = DummyState()
-    st.topic = 'X'
-    st.stance = Stance.PRO
-    store.save(conv_id, st)
-    msgs = make_msgs()
-
-    out = await svc.analyze_conversation(
-        messages=msgs, stance=Stance.PRO, conversation_id=conv_id, topic=st.topic
-    )
-
-    assert isinstance(out, str)
-    assert store.get(conv_id).positive_judgements == 0  # gated
-
-
-def test_payload_builder_sentence_scan_and_on_topic_flags():
-    """
-    Validar que el builder calcula:
-      - thesis_agg
-      - max_sent_contra del sentence scanning
-      - heurística on_topic
-      - pair_best agregado (de la claim más contradictoria)
-    """
-    # Primera oración neutral; segunda fuertemente contradictoria
-    sent1 = mk_dir(0.20, 0.70, 0.10)
-    sent2 = mk_dir(0.10, 0.05, 0.85)
-
-    thesis_neutral = mk_bidir(sent1, sent1)
-    thesis_contra = mk_bidir(sent2, sent2)
-
-    nli = FakeNLI(
-        sequence=[thesis_neutral], per_sentence=[thesis_neutral, thesis_contra]
-    )
-
-    svc = ConcessionService(
-        llm=FakeDebateLLM(),
-        judge=FakeJudgeLLM(),  # no usado en builder, pero requerido por ctor
-        nli=nli,
-        nli_config=NLIConfig(),
-        scoring=ScoringConfig(),
-        debate_store=InMemoryDebateStore(),
-    )
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'Assistant long message with multiple sentences to meet min words.',
-        },
-        {
-            'role': 'user',
-            'content': 'Primera oración neutral. Sin embargo, esto contradice claramente la tesis.',
-        },
-    ]
-
-    payload, user_txt, bot_txt = svc._build_llm_judge_payload(
-        conversation=conv,
-        stance=Stance.PRO,
-        topic='El universo requiere un creador',
-        state=DummyState(),
-    )
-
-    assert payload is not None
-    d = payload.to_dict()
-    assert d['topic'] == 'El universo requiere un creador'
-    assert _is_procon_or_enum(d.get('stance'))
-    ts = _alias(d, 'thesis_scores', 'thesis_agg')
-    assert 0.0 <= ts['entailment'] <= 1.0
-    max_contra = _alias(d, 'max_sent_contra')
-    assert 0.80 <= max_contra <= 0.90  # strong second sentence
-    assert isinstance(_alias(d, 'pair_best', 'pair_agg'), dict)
-    assert isinstance(user_txt, str) and isinstance(bot_txt, str)
-
-
-def test_payload_builder_pair_best_from_claims():
-    """
-    Asegurar que pair_best se arma desde la claim más contradictoria del assistant.
-    """
-    # Secuencia pairwise: primera claim neutral, segunda contradice
-    pair_neutral = mk_bidir(mk_dir(0.20, 0.70, 0.10), mk_dir(0.22, 0.68, 0.10))
-    pair_contra = mk_bidir(mk_dir(0.10, 0.25, 0.72), mk_dir(0.12, 0.22, 0.75))
-
-    # Thesis agg (no relevante acá)
-    thesis_any = mk_bidir(mk_dir(0.30, 0.60, 0.10), mk_dir(0.32, 0.58, 0.10))
-    nli = FakeNLI(sequence=[thesis_any])
-
-    svc = ConcessionService(
-        llm=FakeDebateLLM(),
-        judge=FakeJudgeLLM(),  # no usado en builder
-        nli=nli,
-        nli_config=NLIConfig(),
-        scoring=ScoringConfig(),
-        debate_store=InMemoryDebateStore(),
-    )
-
-    conv = [
-        {
-            'role': 'assistant',
-            'content': 'First claim is tentative. Second claim clearly rejects the thesis.',
-        },
-        {
-            'role': 'user',
-            'content': 'Long enough user text to consider claims and compute pairwise scores.',
-        },
-    ]
-
-    # Monkeypatch _claim_scores para usar nuestros dos paquetes
-    def fake_claim_scores(claims: List[str], user_clean: str):
-        # Retorna tuplas (claim, ent, contra, rel, bidir_scores)
+    # ----------------------------- helpers -----------------------------
+    @staticmethod
+    def _map_history(messages: List[Message]) -> List[dict]:
         return [
-            (claims[0], 0.30, 0.10, 0.30, pair_neutral),
-            (claims[1], 0.20, 0.75, 0.75, pair_contra),  # la más contradictoria
+            {'role': ('assistant' if m.role == 'bot' else 'user'), 'content': m.message}
+            for m in messages
         ]
 
-    svc._claim_scores = fake_claim_scores  # type: ignore
+    @staticmethod
+    def _last_index(
+        convo: List[dict],
+        role: str,
+        predicate=None,
+        before: Optional[int] = None,
+    ) -> Optional[int]:
+        end = (before if before is not None else len(convo)) - 1
+        for i in range(end, -1, -1):
+            if convo[i].get('role') != role:
+                continue
+            if predicate and not predicate(convo[i]):
+                continue
+            return i
+        return None
 
-    payload, _, _ = svc._build_llm_judge_payload(
-        conversation=conv,
-        stance=Stance.CON,
-        topic='Thesis T',
-        state=DummyState(),
-    )
-    assert payload is not None
-    d = payload.to_dict()
-    pb = _alias(d, 'pair_best', 'pair_agg')
-    assert 0.70 <= pb['contradiction'] <= 0.80  # provino de la segunda claim
-    assert _is_procon_or_enum(d.get('stance'))
+    @staticmethod
+    def _count_assistant_turns(messages: List[Message]) -> int:
+        return sum(1 for m in messages if m.role == 'bot')
+
+    def _extract_claims(self, bot_txt: str) -> List[str]:
+        """
+        Extracts declarative, substantive claims from the assistant's prior turn,
+        excluding questions and meta banners. Guards against truncated fragments.
+        """
+        if not bot_txt:
+            return []
+        raw_parts = [
+            p.strip() for p in re.split(r'(?<=[.!?…])\s+', bot_txt) if p.strip()
+        ]
+        parts = strip_trailing_fragment(raw_parts)
+
+        claims: List[str] = []
+        skipped_banners = 0
+        for s in parts:
+            if s.endswith('?') or looks_like_question(s):
+                continue
+            s2 = drop_questions(s).strip()
+            if not s2:
+                continue
+            s2_l = s2.lower()
+            if any(s2_l.startswith(prefix) for prefix in ACK_PREFIXES):
+                continue
+            if any(b in s2_l for b in STANCE_BANNERS):
+                skipped_banners += 1
+                continue
+            if not s2.endswith(('.', '!')):
+                s2 += '.'
+            if len(s2.split()) >= 3:
+                claims.append(s2)
+
+        if skipped_banners:
+            logger.debug('[claims] skipped_banners=%d', skipped_banners)
+        logger.debug('[claims] extracted=%d', len(claims))
+        return claims
+
+    def _claim_scores(
+        self, claims: List[str], user_clean: str
+    ) -> List[Tuple[str, float, float, float, Dict[str, Dict[str, float]]]]:
+        out: List[Tuple[str, float, float, float, Dict[str, Dict[str, float]]]] = []
+        for c in claims:
+            sc = self.nli.bidirectional_scores(c, user_clean) if self.nli else {}
+            agg = (
+                agg_max(sc)
+                if sc
+                else {'entailment': 0.0, 'neutral': 1.0, 'contradiction': 0.0}
+            )
+            ent = float(agg.get('entailment', 0.0))
+            con = float(agg.get('contradiction', 0.0))
+            neu = float(agg.get('neutral', 1.0))
+            rel = max(ent, con, 1.0 - neu)
+            out.append((c, ent, con, rel, sc))
+        return out
+
+    def _on_topic_from_scores(self, thesis_scores: Dict[str, Dict[str, float]]) -> bool:
+        ph = thesis_scores.get('p_to_h', {}) or {}
+        hp = thesis_scores.get('h_to_p', {}) or {}
+
+        def has_signal(d: Dict[str, float]) -> bool:
+            ent = float(d.get('entailment', 0.0))
+            con = float(d.get('contradiction', 0.0))
+            neu = float(d.get('neutral', 1.0))
+            return (max(ent, con) >= self.scoring.topic_signal_min) or (
+                neu <= self.scoring.topic_neu_max
+            )
+
+        on = has_signal(ph) or has_signal(hp)
+        logger.debug('[topic] on_topic=%s | agg=%s', on, round3(agg_max(thesis_scores)))
+        return on
+
+    def _max_contra_self_vs_sentences(
+        self, self_thesis: str, user_txt: str
+    ) -> Tuple[float, float, Dict[str, Dict[str, float]]]:
+        if not user_txt or not self_thesis or self.nli is None:
+            logger.debug('[sent_scan] empty inputs or NLI disabled')
+            return 0.0, 0.0, {}
+
+        parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', user_txt) if p.strip()]
+        sentences: List[str] = []
+        for s in parts:
+            s2 = drop_questions(s).strip()
+            if not s2 or s.endswith('?'):
+                continue
+            if not s2.endswith(('.', '!', '?')):
+                s2 += '.'
+            sentences.append(s2)
+
+        max_contra = 0.0
+        ent_at_max = 0.0
+        scores_at_max: Dict[str, Dict[str, float]] = {}
+        for s in sentences:
+            sc = self.nli.bidirectional_scores(self_thesis, s)
+            agg = agg_max(sc)
+            ent = float(agg.get('entailment', 0.0))
+            con = float(agg.get('contradiction', 0.0))
+            if con >= max_contra:
+                max_contra = con
+                ent_at_max = ent
+                scores_at_max = sc
+
+        logger.debug(
+            '[sent_scan] sentences=%d | max_contra=%.3f ent_at_max=%.3f',
+            len(sentences),
+            max_contra,
+            ent_at_max,
+        )
+        return max_contra, ent_at_max, scores_at_max
+
+    @staticmethod
+    def _tokenize_norm(s: str) -> List[str]:
+        # Alphanumeric tokens, lowercased, punctuation stripped
+        if not s:
+            return []
+        s = s.lower()
+        s = s.translate(str.maketrans('', '', string.punctuation + '¿¡“”"…—–-'))
+        tokens = re.findall(r'\b\w+\b', s)
+        return [t for t in tokens if len(t) > 2 and t not in STOP_ALL]
+
+    @staticmethod
+    def _char_ngrams(s: str, n: int = 3) -> set:
+        if not s:
+            return set()
+        s2 = s.lower()
+        s2 = re.sub(r'\s+', ' ', s2).strip()
+        s2 = s2.translate(
+            str.maketrans('', '', ' \t\n\r' + string.punctuation + '¿¡“”"…—–-')
+        )
+        if len(s2) < n:
+            return {s2} if s2 else set()
+        return {s2[i : i + n] for i in range(len(s2) - n + 1)}
+
+    @staticmethod
+    def _jaccard(a: set, b: set) -> float:
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union else 0.0
+
+    def _novelty_score(self, current: str, previous_texts: List[str]) -> float:
+        """
+        Returns novelty in [0,1]. 1.0 = completely new, 0.0 = duplicated.
+        Uses a max-similarity penalty against any prior user message.
+        """
+        if not current:
+            return 0.0
+        if not previous_texts:
+            return 1.0
+
+        cur_ngrams = self._char_ngrams(current, n=3)
+        cur_tokens = set(self._tokenize_norm(current))
+
+        max_sim = 0.0
+        for prev in previous_texts:
+            prev_ngrams = self._char_ngrams(prev, n=3)
+            prev_tokens = set(self._tokenize_norm(prev))
+
+            jacc = self._jaccard(cur_ngrams, prev_ngrams)
+            tok_sim = (
+                len(cur_tokens & prev_tokens) / max(len(cur_tokens), len(prev_tokens))
+                if (cur_tokens or prev_tokens)
+                else 1.0
+            )
+            sim = 0.65 * jacc + 0.35 * tok_sim
+            if sim > max_sim:
+                max_sim = sim
+
+        novelty = 1.0 - max_sim
+        return max(0.0, min(1.0, novelty))
+
+    def _latest_user_novelty(self, convo: List[dict], latest_user_idx: int) -> float:
+        """
+        Compute novelty of the latest user message vs all *prior* user messages.
+        """
+        latest_txt = convo[latest_user_idx].get('content', '')
+        prev_users = [
+            m.get('content', '')
+            for i, m in enumerate(convo[:latest_user_idx])
+            if m.get('role') == 'user' and m.get('content')
+        ]
+        return self._novelty_score(latest_txt, prev_users)

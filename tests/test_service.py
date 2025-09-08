@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from app.domain.concession_policy import DebateState
-from app.domain.errors import InvalidTopic
+from app.domain.errors import ConversationExpired, ConversationNotFound, InvalidTopic
 from app.domain.models import Conversation, Message
 from app.services.concession_service import ConcessionService
 from app.services.message_service import MessageService
@@ -44,37 +44,38 @@ def repo():
 
 @pytest.fixture
 def llm():
+    # `ConcessionService` uses debate_aware for mid-debate replies
     return SimpleNamespace(
         generate=AsyncMock(return_value='bot reply'),
-        debate=AsyncMock(return_value='bot msg processing reply'),
+        debate_aware=AsyncMock(return_value='bot msg processing reply'),
     )
 
 
 @pytest.fixture
 def debate_store():
-    # State only needs fields touched by start_conversation
+    # Include create/save for start_conversation and get/save for continue_conversation
     return SimpleNamespace(
         create=Mock(return_value=DebateState(stance='con', topic='X', lang='en')),
+        get=Mock(),  # set per-test where needed
         save=Mock(),
     )
 
 
-# NUEVO: fixtures para dependencias requeridas por MessageService
 @pytest.fixture
 def nli():
-    # No se usa en estos tests, puede ser un namespace vacío o con métodos ficticios
-    return SimpleNamespace(
-        analyze=AsyncMock(return_value={}),  # opcional
-    )
+    # not used in these tests; keep signature compatible
+    return SimpleNamespace(analyze=AsyncMock(return_value={}))
 
 
 @pytest.fixture
 def judge():
-    # start_conversation no lo usa, pero igual proveemos una firma coherente
     fake_judge_result = SimpleNamespace(
         accept=False, ended=False, reason='init', assistant_reply='', confidence=0.0
     )
     return SimpleNamespace(nli_judge=AsyncMock(return_value=fake_judge_result))
+
+
+# ---------------------- start_conversation tests ---------------------- #
 
 
 @pytest.mark.asyncio
@@ -98,7 +99,6 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
         nli=nli,
         judge=judge,
         llm=llm,
-        debate_store=debate_store,
     )
 
     svc = MessageService(
@@ -154,7 +154,6 @@ async def test_start_conversation_valid_topic_flows_normally(
         nli=nli,
         judge=judge,
         llm=llm,
-        debate_store=debate_store,
     )
 
     svc = MessageService(
@@ -221,7 +220,6 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
         nli=nli,
         judge=judge,
         llm=llm,
-        debate_store=debate_store,
     )
 
     svc = MessageService(
@@ -254,3 +252,72 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
             Message(role='bot', message='bot reply'),
         ],
     }
+
+
+# ---------------------- continue_conversation tests ---------------------- #
+
+
+@pytest.mark.asyncio
+async def test_continue_conversation_loads_and_saves_state_calls_concession(
+    repo, llm, debate_store
+):
+    """
+    Persists via MessageService:
+      - loads state with debate_store.get
+      - delegates to ConcessionService.analyze_conversation(state=...)
+      - saves returned updated_state with debate_store.save
+    """
+    # Conversation present and not expired
+    future = datetime.now(timezone.utc) + timedelta(minutes=20)
+    conversation = Conversation(
+        id=7, topic='God exists', stance='con', expires_at=future
+    )
+    repo.get_conversation.return_value = conversation
+
+    # History the service will hand over
+    repo.all_messages.return_value = [
+        Message(role='user', message='Topic: God exists. Side: CON.'),
+        Message(role='bot', message='previous bot'),
+    ]
+
+    # Provide an initial state and make .get return it
+    state = DebateState(stance='con', topic='God exists', lang='en')
+    debate_store.get.return_value = state
+
+    # Stub ConcessionService to new signature -> returns (reply, updated_state)
+    cs = ConcessionService(
+        nli=nli,
+        judge=judge,
+        llm=llm,
+    )
+    cs.analyze_conversation = AsyncMock(
+        return_value=('assistant reply', state)  # echo same state for simplicity
+    )
+
+    svc = MessageService(
+        parser=Mock(),  # not used on continue
+        repo=repo,
+        concession_service=cs,
+        llm=llm,
+        debate_store=debate_store,
+        topic_checker=SimpleNamespace(check_topic=AsyncMock()),  # not used on continue
+    )
+
+    # Act
+    out = await svc.continue_conversation(message='user follow-up', conversation_id=7)
+
+    # Assert persistence & delegation
+    debate_store.get.assert_called_once_with(7)
+    cs.analyze_conversation.assert_awaited_once()
+    debate_store.save.assert_called_once_with(conversation_id=7, state=state)
+
+    # Bot reply written
+    repo.add_message.assert_has_awaits(
+        [
+            call(conversation_id=7, role='user', text='user follow-up'),
+            call(conversation_id=7, role='bot', text='assistant reply'),
+        ]
+    )
+
+    assert out['conversation_id'] == 7
+    assert isinstance(out['message'], list)

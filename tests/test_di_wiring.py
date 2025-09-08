@@ -38,13 +38,11 @@ def test_get_concession_singleton_returns_service_and_wires():
     llm = DummyLLM()
 
     svc = get_concession_singleton(
-        debate_store=store,
         nli=nli,
         llm=llm,
     )
     assert isinstance(svc, ConcessionService)
     # identity checks: uses exactly the same instances we passed in
-    assert svc.debate_store is store
     assert svc.nli is nli
     assert svc.llm is llm
 
@@ -58,7 +56,6 @@ def test_get_service_returns_message_service_and_wires_everything():
 
     # Build a ConcessionService the same way FastAPI DI would provide
     concession = get_concession_singleton(
-        debate_store=store,
         nli=nli,
         llm=llm,
     )
@@ -68,7 +65,6 @@ def test_get_service_returns_message_service_and_wires_everything():
         llm=llm,
         concession=concession,
         topic_checker=topic_checker,  # accepted but not stored by MessageService
-        debate_store=store,
     )
 
     assert isinstance(ms, MessageService)
@@ -79,7 +75,6 @@ def test_get_service_returns_message_service_and_wires_everything():
     assert ms.repo is repo
     assert ms.llm is llm
     assert ms.concession_service is concession
-    assert ms.debate_store is store
 
     # NEW: the service keeps topic_checker
     assert hasattr(ms, 'topic_checker')
@@ -96,31 +91,26 @@ def test_get_service_accepts_alternate_instances_without_sharing():
     nli1, llm1, llm2 = DummyNLI(), DummyLLM(), DummyLLM()
     topic_checker1 = DummyTopicChecker()
 
-    concession1 = get_concession_singleton(debate_store=store1, nli=nli1, llm=llm1)
+    concession1 = get_concession_singleton(nli=nli1, llm=llm1)
     ms1 = get_service(
         repo=repo1,
         llm=llm1,
         concession=concession1,
         topic_checker=topic_checker1,
-        debate_store=store1,
     )
 
-    concession2 = get_concession_singleton(
-        debate_store=store2, nli=DummyNLI(), llm=llm2
-    )
+    concession2 = get_concession_singleton(nli=DummyNLI(), llm=llm2)
     ms2 = get_service(
         repo=repo2,
         llm=llm2,
         concession=concession2,
         topic_checker=DummyTopicChecker(),
-        debate_store=store2,
     )
 
     # Distinct objects across invocations
     assert ms1 is not ms2
     assert ms1.repo is repo1 and ms2.repo is repo2
     assert ms1.llm is llm1 and ms2.llm is llm2
-    assert ms1.debate_store is store1 and ms2.debate_store is store2
     assert (
         ms1.concession_service is concession1 and ms2.concession_service is concession2
     )

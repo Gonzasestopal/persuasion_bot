@@ -16,12 +16,11 @@ from app.services.message_service import MessageService
 
 
 def get_concession_singleton(
-    debate_store=Depends(get_state_store),
     nli: NLIPort = Depends(get_nli_singleton),
     llm: LLMPort = Depends(get_llm_singleton),
     judge: LLMPort = Depends(get_judge_singleton),
 ) -> ConcessionService:
-    return ConcessionService(llm=llm, debate_store=debate_store, nli=nli, judge=judge)
+    return ConcessionService(llm=llm, nli=nli, judge=judge)
 
 
 def get_service(
