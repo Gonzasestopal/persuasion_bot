@@ -1,6 +1,7 @@
 # app/services/concession_service.py
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional
 
 from app.adapters.nli.hf_nli import HFNLIProvider
@@ -9,12 +10,12 @@ from app.domain.ports.llm import LLMPort
 from app.domain.ports.scoring import ScoreJudgePort, ScoreVerdict
 from app.services.scoring import (
     RunningScores,
-    build_context_footer,
-    build_score_footer,
+    build_context_signal,
+    build_score_signal,
     deterministic_verdict_from_eval,
     features_from_last_eval,
-    join_footers,
     judge_last_two_messages,
+    make_scoring_system_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,15 @@ class _NLIConfig:
     max_claims_per_turn: int = 3
 
 
+class Stance(str, Enum):
+    PRO = 'PRO'
+    CON = 'CON'
+
+
 class ConcessionService:
     """
-    Thin orchestrator: maps history, calls scoring helpers, updates in-memory
-    aggregates per conversation, and appends ephemeral footers to debate LLM.
+    Thin orchestrator: judge the last assistant→user pair, update running
+    in-memory aggregates, and pass hidden <SCORING> system signals to the LLM.
     """
 
     def __init__(
@@ -49,35 +55,33 @@ class ConcessionService:
         self.entailment_threshold = config.entailment_threshold
         self.contradiction_threshold = config.contradiction_threshold
         self.score_judge = score_judge
-
-        # in-memory running scores keyed by conversation_id
         self._scores: Dict[int, RunningScores] = {}
 
     async def analyze_conversation(
         self,
         messages: List[Message],
-        side: str,
+        side: Stance,
         conversation_id: int,
         topic: str,
     ) -> str:
+        stance = Stance(side.upper())
         mapped = self._map_history(messages)
 
-        # Score only the last assistant→user pair
         last_eval = judge_last_two_messages(
             mapped,
-            side=side,
+            stance=stance.value,
             topic=topic,
             nli=self.nli,
             entailment_threshold=self.entailment_threshold,
             contradiction_threshold=self.contradiction_threshold,
         )
 
-        context_footer: Optional[str] = None
+        scoring_system_msg: Optional[str] = None
+
         if last_eval:
-            # features → score_judge (optional) → deterministic fallback
             features = features_from_last_eval(
                 last_eval,
-                side=side,
+                stance=stance.value,
                 entailment_threshold=self.entailment_threshold,
                 contradiction_threshold=self.contradiction_threshold,
             )
@@ -96,7 +100,7 @@ class ConcessionService:
                     contradiction_threshold=self.contradiction_threshold,
                 )
 
-            # update in-memory running totals
+            # update in-memory aggregates
             rs = self._scores.setdefault(conversation_id, RunningScores())
             rs.update(
                 align=verdict['alignment'],
@@ -104,8 +108,8 @@ class ConcessionService:
                 ps=last_eval['scores'],
             )
 
-            # build ephemeral footers
-            footer_context = build_context_footer(
+            # build hidden signals
+            ctx_sig = build_context_signal(
                 {
                     'alignment': verdict['alignment'],
                     'concession': verdict['concession'],
@@ -115,11 +119,14 @@ class ConcessionService:
                     'topic': topic,
                 }
             )
-            footer_score = build_score_footer(rs)
-            context_footer = join_footers(footer_context, footer_score)
+            agg_sig = build_score_signal(rs)
+            scoring_system_msg = make_scoring_system_message(ctx_sig, agg_sig)
 
-        # call debate LLM with injected footer(s)
-        reply = await self.llm.debate(messages=messages, context_footer=context_footer)
+        # LLM sees signals as an extra system message; MUST NOT show to user
+        reply = await self.llm.debate(
+            messages=messages,
+            scoring_system_msg=scoring_system_msg,
+        )
         return reply.strip()
 
     @staticmethod

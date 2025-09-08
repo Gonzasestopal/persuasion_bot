@@ -1,3 +1,4 @@
+# app/adapters/llm/openai_adapter.py
 from typing import Iterable, List, Optional
 
 from openai import OpenAI
@@ -29,12 +30,12 @@ class OpenAIAdapter(LLMPort):
         self.difficulty = difficulty
 
     @property
-    def system_prompt(self):
+    def system_prompt(self) -> str:
         if self.difficulty == Difficulty.MEDIUM:
             return MEDIUM_SYSTEM_PROMPT
         return SYSTEM_PROMPT
 
-    def _build_user_msg(self, topic: str, side: str):
+    def _build_user_msg(self, topic: str, side: str) -> str:
         return f"You are debating the topic '{topic}'.\nTake the {side} side.\n\n"
 
     def _request(self, input_msgs: Iterable[dict]) -> str:
@@ -65,16 +66,15 @@ class OpenAIAdapter(LLMPort):
         self,
         messages: List[Message],
         *,
-        context_footer: Optional[str] = None,  # <-- NEW
+        scoring_system_msg: Optional[str] = None,  # hidden system message
     ) -> str:
         mapped = self._map_history(messages)
 
-        # If provided, append footer at the end of the system prompt.
-        system = self.system_prompt
-        if context_footer:
-            # Ensure it’s on its own line and does not interfere with rules.
-            system = f'{system.rstrip()}\n\n{context_footer}'
-
-        input_msgs = [{'role': 'system', 'content': system}]
+        input_msgs = [{'role': 'system', 'content': self.system_prompt}]
+        if scoring_system_msg:
+            # separate system message with hidden telemetry
+            input_msgs.append({'role': 'system', 'content': scoring_system_msg})
         input_msgs.extend(mapped)
-        return self._request(input_msgs)
+
+        reply = self._request(input_msgs)
+        return reply

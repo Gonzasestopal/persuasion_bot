@@ -1,4 +1,5 @@
 # app/services/scoring.py
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.adapters.nli.hf_nli import HFNLIProvider
 from app.domain.ports.scoring import ScoreFeatures, ScoreVerdict
+from app.domain.scoring import ContextSignal, ScoreSignal
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ class RunningScores:
         self.pC_ema = alpha * pC + (1 - alpha) * self.pC_ema
 
 
-# ----- Helpers that used to live in ConcessionService -----
+# ----- Core helpers -----
 def drop_questions(text: str) -> str:
     sents = [s.strip() for s in re.split(SENT_SPLIT_RX, text) if s.strip()]
     sents = [s for s in sents if not re.search(IS_QUESTION_RX, s)]
@@ -87,17 +89,10 @@ def alignment_and_scores_topic_aware(
     entailment_threshold: float,
     contradiction_threshold: float,
 ) -> Tuple[str, Dict[str, float], Dict[str, float]]:
-    """
-    Returns:
-      align: 'OPPOSITE' | 'SAME' | 'UNKNOWN'
-      pair_scores: best of {user->bot, bot->user}
-      thesis_scores: NLI(user_text, thesis(topic, stance))
-    """
     bot_clean = drop_questions(bot_text)
 
     s_u2b = nli.score(user_text, bot_clean)
     s_b2u = nli.score(bot_clean, user_text)
-
     pair_scores = (
         s_u2b
         if max(s_u2b['entailment'], s_u2b['contradiction'])
@@ -254,38 +249,53 @@ def deterministic_verdict_from_eval(
     }
 
 
-# ----- Footers -----
-def build_context_footer(ev: Optional[dict]) -> Optional[str]:
+# ----- Signals (internal, hidden) -----
+def build_context_signal(ev: Optional[dict]) -> Optional[ContextSignal]:
     if not ev:
         return None
-    ts = ev.get('thesis_scores', {})
-    ps = ev.get('scores', {})
+    ts = ev.get('thesis_scores', {}) or {}
+    ps = ev.get('scores', {}) or {}
 
-    def g(d, k):
+    def g(d: Dict[str, float], k: str) -> float:
         try:
             return float(d.get(k, 0.0))
         except Exception:
             return 0.0
 
     topic = (ev.get('topic') or '').strip().replace('\n', ' ').replace('"', "'")
-    return (
-        f'[Context] align={ev.get("alignment", "UNKNOWN")} '
-        f'| concession={str(ev.get("concession", False)).lower()} '
-        f'| reason={ev.get("reason", "underdetermined")} '
-        f'| tE={g(ts, "entailment"):.2f} tC={g(ts, "contradiction"):.2f} '
-        f'| pE={g(ps, "entailment"):.2f} pC={g(ps, "contradiction"):.2f} '
-        f'| topic="{topic}"'
+    return ContextSignal(
+        align=ev.get('alignment', 'UNKNOWN'),
+        concession=bool(ev.get('concession', False)),
+        reason=ev.get('reason', 'underdetermined'),
+        tE=g(ts, 'entailment'),
+        tC=g(ts, 'contradiction'),
+        pE=g(ps, 'entailment'),
+        pC=g(ps, 'contradiction'),
+        topic=topic,
     )
 
 
-def build_score_footer(rs: RunningScores) -> str:
-    return (
-        f'[Score] turns={rs.turns} | opp={rs.opp} same={rs.same} unk={rs.unk} '
-        f'| tE_ema={rs.tE_ema:.2f} tC_ema={rs.tC_ema:.2f} '
-        f'| pE_ema={rs.pE_ema:.2f} pC_ema={rs.pC_ema:.2f}'
+def build_score_signal(rs: RunningScores) -> ScoreSignal:
+    return ScoreSignal(
+        turns=rs.turns,
+        opp=rs.opp,
+        same=rs.same,
+        unk=rs.unk,
+        tE_ema=rs.tE_ema,
+        tC_ema=rs.tC_ema,
+        pE_ema=rs.pE_ema,
+        pC_ema=rs.pC_ema,
     )
 
 
-def join_footers(*parts: Optional[str]) -> Optional[str]:
-    lines = [p for p in parts if p]
-    return '\n'.join(lines) if lines else None
+def make_scoring_system_message(
+    ctx: Optional[ContextSignal], agg: Optional[ScoreSignal]
+) -> Optional[str]:
+    if not ctx and not agg:
+        return None
+    payload: Dict[str, dict] = {}
+    if ctx:
+        payload['context'] = ctx.to_dict()
+    if agg:
+        payload['score'] = agg.to_dict()
+    return f'<SCORING>{json.dumps(payload, ensure_ascii=False)}</SCORING>'
