@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.domain.enums import Stance
 from app.domain.models import Message
 from app.domain.nli.config import NLIConfig
+from app.domain.nli.judge_payload import NLIJudgePayload
 from app.domain.nli.scoring import ScoringConfig
 from app.domain.ports.debate_store import DebateStorePort
 from app.domain.ports.llm import LLMPort
@@ -27,15 +28,22 @@ logger.setLevel(logging.DEBUG)
 
 class ConcessionService:
     """
-    Judge logic compatible with your unit tests:
-    - Strong thesis contradiction (≥ strict_contra_threshold) -> concede (reason 'thesis_opposition_soft'),
-      even if the user is short (overrides min words).
-    - Pairwise contradiction fallback -> concede if on-topic & user long enough (reason 'pairwise_opposition_soft').
-    - Thesis support -> SAME (reason 'thesis_support'), non-conceding.
-    - Off-topic blocks pairwise concession.
-    - Topic gate is computed from canonical self-thesis vs user.
-    - Includes sentence-level scan for thesis contradiction (max across sentences).
+    Assumptions:
+      - Upstream topic gate guarantees a normalized debate-ready `topic`.
+      - Upstream also sets the final `stance` the bot must take.
+      - This service computes NLI evidence and delegates the *final* decision
+        to the adapter's LLM-based NLI judge (primary & only judge).
     """
+
+    ACK_PREFIXES = (
+        'thanks',
+        'thank you',
+        'i appreciate',
+        'good point',
+        'fair point',
+        'i see',
+        'understand',
+    )
 
     def __init__(
         self,
@@ -44,17 +52,26 @@ class ConcessionService:
         nli_config: Optional[NLIConfig] = None,
         scoring: Optional[ScoringConfig] = None,
         debate_store: Optional[DebateStorePort] = None,
+        *,
+        llm_judge_min_confidence: float = 0.70,
     ) -> None:
+        self.llm = llm
+        self.nli = nli
+        self.debate_store = debate_store
         self.nli_config = nli_config or NLIConfig()
         self.scoring = scoring or ScoringConfig()
-        self.nli = nli
-        self.llm = llm
-        self.debate_store = debate_store
+
+        # LLM judge confidence gate (applied here if you want to gate effects)
+        self.llm_judge_min_confidence = float(llm_judge_min_confidence)
 
     # ----------------------------- public API -----------------------------
 
     async def analyze_conversation(
-        self, messages: List[Message], stance: Stance, conversation_id: int, topic: str
+        self,
+        messages: List[Message],
+        stance: Stance,  # kept for compatibility; state is authoritative
+        conversation_id: int,
+        topic: str,  # kept for compatibility; state is authoritative
     ) -> str:
         state = self.debate_store.get(conversation_id)
         if state is None:
@@ -62,270 +79,242 @@ class ConcessionService:
                 f'DebateState missing for conversation_id={conversation_id}'
             )
 
+        topic_clean: str = getattr(state, 'topic', topic)
+
         logger.debug(
-            '[analyze] conv_id=%s stance=%s topic=%s',
+            '[analyze] conv_id=%s stance=%s topic=%s | turns=%d msgs=%d',
             conversation_id,
-            stance.value,
-            trunc(topic),
+            stance,
+            trunc(topic_clean),
+            getattr(state, 'assistant_turns', 0),
+            len(messages),
         )
 
-        if state.match_concluded:
+        if getattr(state, 'match_concluded', False):
+            logger.debug(
+                '[analyze] match already concluded → sending after_end_message'
+            )
             return after_end_message(state=state)
 
-        mapped = [
-            {'role': ('assistant' if m.role == 'bot' else 'user'), 'content': m.message}
-            for m in messages
-        ]
-
-        out = self.judge_last_two_messages(
-            conversation=mapped, stance=stance, topic=topic
+        mapped = self._map_history(messages)
+        logger.debug(
+            '[analyze] mapped_history: %d entries (u/a roles preserved)', len(mapped)
         )
 
-        if out and out.get('concession'):
-            state.positive_judgements += 1
-            logger.debug(
-                "[concession] conv_id=%s +1 concession (total=%s) | reason=%s | user='%s' | bot='%s'",
-                conversation_id,
-                state.positive_judgements,
-                out.get('reason'),
-                trunc(out.get('user_text_sample', ''), 80),
-                trunc(out.get('bot_text_sample', ''), 80),
-            )
-            self.debate_store.save(conversation_id=conversation_id, state=state)
+        # ---- Compute NLI evidence & call the LLM Judge (primary) ----
+        judge_concession = False
 
+        payload, user_txt, bot_txt = self._build_llm_judge_payload(
+            conversation=mapped,
+            stance=stance,
+            topic=topic_clean,
+        )
+        if payload is not None:
+            # Adapter owns the prompt + result dataclass; we accept object or dict.
+            decision = await self.llm.nli_judge(payload=payload.to_dict())
+
+            verdict = getattr(decision, 'verdict', None) or (
+                isinstance(decision, dict) and decision.get('verdict')
+            )
+            concession = getattr(decision, 'concession', None)
+            if concession is None and isinstance(decision, dict):
+                concession = bool(decision.get('concession', False))
+            confidence = getattr(decision, 'confidence', None)
+            if confidence is None and isinstance(decision, dict):
+                try:
+                    confidence = float(decision.get('confidence', 0.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+            reason = getattr(decision, 'reason', None) or (
+                isinstance(decision, dict) and decision.get('reason') or ''
+            )
+
+            logger.debug(
+                '[llm_judge] verdict=%s concession=%s conf=%.2f reason=%s',
+                verdict,
+                concession,
+                confidence or 0.0,
+                reason,
+            )
+
+            # Optional effect gate by confidence (kept minimal here)
+            if bool(concession) and (
+                confidence is None or confidence >= self.llm_judge_min_confidence
+            ):
+                judge_concession = True
+
+            # Record concession counts if any
+            if judge_concession:
+                state.positive_judgements += 1
+                logger.debug(
+                    "[concession] conv_id=%s +1 (total=%s) | reason=%s | user='%s' | bot='%s'",
+                    conversation_id,
+                    state.positive_judgements,
+                    (reason or 'llm_judge'),
+                    trunc(user_txt, 80),
+                    trunc(bot_txt, 80),
+                )
+        else:
+            logger.debug(
+                '[llm_judge] skipped: insufficient context to compute evidence'
+            )
+
+        # Short-circuit if match should end before generating a reply
         if getattr(state, 'maybe_conclude', lambda: False)():
             state.match_concluded = True
             self.debate_store.save(conversation_id=conversation_id, state=state)
+            logger.debug('[analyze] match concluded after judge → build_verdict')
             return build_verdict(state=state)
 
+        # Generate reply
         reply = await self.llm.debate(messages=messages, state=state)
-        reply = sanitize_end_markers(reply)
+        reply = sanitize_end_markers(reply).strip()
 
+        # Update turn count and (maybe) conclude once
         state.assistant_turns += 1
+        logger.debug('[analyze] assistant_turns=%d', state.assistant_turns)
         if getattr(state, 'maybe_conclude', lambda: False)():
             state.match_concluded = True
             self.debate_store.save(conversation_id=conversation_id, state=state)
+            logger.debug('[analyze] match concluded after reply → build_verdict')
             return build_verdict(state=state)
 
         self.debate_store.save(conversation_id=conversation_id, state=state)
-        return reply.strip()
+        logger.debug('[analyze] returning reply (len=%d)', len(reply))
+        return reply
 
-    # ----------------------------- judge -----------------------------
+    # ----------------------------- LLM Judge payload builder -----------------------------
 
-    def judge_last_two_messages(
-        self, conversation: List[dict], stance: Stance, topic: str
-    ) -> Optional[Dict[str, Any]]:
+    def _build_llm_judge_payload(
+        self,
+        *,
+        conversation: List[dict],
+        stance: Stance,
+        topic: str,
+    ) -> Tuple[Optional[NLIJudgePayload], str, str]:
+        """
+        Build the evidence payload expected by the adapter's LLM Judge.
+
+        Returns: (payload_or_None, user_text, bot_text)
+                 payload_or_None is None if context is insufficient.
+        """
         if not conversation:
-            return None
+            logger.debug('[payload] empty conversation')
+            return None, '', ''
 
-        # last user
-        user_idx = next(
-            (
-                i
-                for i in range(len(conversation) - 1, -1, -1)
-                if conversation[i].get('role') == 'user'
-            ),
-            None,
-        )
+        user_idx = self._last_index(conversation, role='user')
         if user_idx is None:
-            return None
+            logger.debug('[payload] no user message found')
+            return None, '', ''
 
-        # most recent substantive assistant before that (>=10 words)
-        bot_idx = next(
-            (
-                i
-                for i in range(user_idx - 1, -1, -1)
-                if conversation[i].get('role') == 'assistant'
-                and word_count(conversation[i].get('content', '')) >= 10
-            ),
-            None,
+        min_asst_words = getattr(self.scoring, 'min_assistant_words', 10)
+        bot_idx = self._last_index(
+            conversation,
+            role='assistant',
+            predicate=lambda m: word_count(m.get('content', '')) >= min_asst_words,
+            before=user_idx,
         )
         if bot_idx is None:
-            return None
+            logger.debug(
+                '[payload] no assistant message meeting min words=%d found',
+                min_asst_words,
+            )
+            return None, '', ''
 
         user_txt = conversation[user_idx]['content']
         bot_txt = conversation[bot_idx]['content']
         user_wc = word_count(user_txt)
         user_clean = normalize_spaces(user_txt)
 
-        # Extract claims from assistant reply (used for pairwise)
-        claims = self._extract_claims(bot_txt)
+        # Thesis & scores
+        thesis = (topic or '').strip()
+        if not thesis:
+            logger.debug('[payload] empty thesis')
+            return None, '', ''
 
-        # Canonical thesis sentences for stance (self/opp)
-        clean_topic = topic
-        canon_self = self._canonical_stance(clean_topic, stance)
-        canon_opp = self._canonical_stance(
-            clean_topic, Stance.CON if stance == Stance.PRO else Stance.PRO
+        # Thesis-level NLI
+        self_scores = self.nli.bidirectional_scores(thesis, user_clean)
+        thesis_agg = agg_max(self_scores)
+        on_topic = self._on_topic_from_scores(self_scores)
+        logger.debug(
+            '[payload] thesis_agg=%s | on_topic=%s', round3(thesis_agg), on_topic
         )
 
-        # --- 1) Pairwise (claims vs user), pick strongest contradiction
+        # Sentence scan (max contradiction)
+        max_sent_contra, _max_ent, _scores_at_max = self._max_contra_self_vs_sentences(
+            thesis, user_txt
+        )
+        logger.debug('[payload] max_sent_contra=%.3f', max_sent_contra)
+
+        # Pairwise best: extract candidate claims from bot and score vs user
+        claims = self._extract_claims(bot_txt)
         if claims:
             claim_scores = self._claim_scores(claims, user_clean)
-            best_by_contra = max(claim_scores, key=lambda t: t[2])
-            best_claim, best_entail, best_contra, best_related, best_pair_scores = (
-                best_by_contra
+            # choose by highest contradiction signal
+            best_claim, _ent, best_contra, best_rel, best_pair_scores = max(
+                claim_scores, key=lambda t: t[2]
+            )
+            pair_agg = agg_max(best_pair_scores)
+            logger.debug(
+                "[payload] best_claim='%s' | best_rel=%.3f best_contra=%.3f | pair_agg=%s",
+                trunc(best_claim, 80),
+                best_rel,
+                best_contra,
+                round3(pair_agg),
             )
         else:
-            best_claim = ''
-            best_entail = 0.0
-            best_contra = 0.0
-            best_related = 0.0
-            best_pair_scores = {'p_to_h': {}, 'h_to_p': {}}
-
-        relatedness_min = getattr(self.scoring, 'relatedness_min', 0.35)
-        engaged = best_related >= relatedness_min
-        logger.debug(
-            "[claims] n=%d | best_contra=%.3f '%s'",
-            len(claims),
-            best_contra,
-            trunc(best_claim, 60),
-        )
-
-        # --- 2) Thesis-level scores (canonical self vs user)
-        self_scores = self.nli.bidirectional_scores(canon_self, user_clean)
-        self_agg = agg_max(self_scores)
-
-        # Topic gate: from thesis scores
-        on_topic = self._on_topic_from_scores(self_scores)
-
-        # Sentence-level scan: max contradiction across user sentences
-        max_sent_contra, max_sent_ent, max_sent_scores = (
-            self._max_contra_self_vs_sentences(canon_self, user_txt)
-        )
-
-        # --- 3) Opposite stance support checks
-        opp_scores = self.nli.bidirectional_scores(canon_opp, user_clean)
-        opp_agg = agg_max(opp_scores)
-
-        support_min = getattr(self.scoring, 'support_min', 0.50)
-        contra_min = getattr(self.scoring, 'strict_contra_threshold', 0.55)
-        pair_soft = getattr(self.scoring, 'contradiction_threshold', 0.55)
-        margin_min = getattr(self.scoring, 'margin_min', 0.15)
-        min_user_words = getattr(self.scoring, 'min_user_words', 8)
-
-        self_ent = float(self_agg.get('entailment', 0.0))
-        self_con = float(self_agg.get('contradiction', 0.0))
-        opp_ent = float(opp_agg.get('entailment', 0.0))
-        opp_con = float(opp_agg.get('contradiction', 0.0))
-
-        # User supports opposite if: entail opposite OR contradict self (with margin)
-        opp_supported = (
-            opp_ent >= support_min and (opp_ent - opp_con) >= margin_min
-        ) or (self_con >= contra_min and (self_con - self_ent) >= margin_min)
-        # User supports our stance?
-        self_supported = (self_ent >= support_min) and (
-            (self_ent - self_con) >= margin_min
-        )
-
-        logger.debug(
-            '[topic] on_topic=%s | agg=%s',
-            on_topic,
-            round3(self_agg),
-        )
-        logger.debug(
-            "[rel] best_claim_relatedness=%.3f (min=%.3f) | best_claim='%s'",
-            best_related,
-            relatedness_min,
-            trunc(best_claim, 60),
-        )
-
-        # ------------------- Decision branches (ordered) -------------------
-
-        # A) Strong thesis contradiction → concede (overrides min words)
-        thesis_strong_contra = max(self_con, max_sent_contra) >= contra_min
-        if thesis_strong_contra and on_topic:
-            return self._mk_result(
-                stance=stance,
-                alignment='OPPOSITE',
-                concession=True,
-                reason='thesis_opposition_soft',
-                pair_scores=max_sent_scores or self_scores,
-                thesis_scores=self_scores,
-                user_txt=user_txt,
-                bot_txt=bot_txt,
-                topic=clean_topic,
+            pair_agg = {'entailment': 0.0, 'contradiction': 0.0, 'neutral': 1.0}
+            logger.debug(
+                '[payload] no claims found in assistant reply; using neutral pair_agg'
             )
 
-        # B) SAME if thesis supported (non-conceding)
-        if on_topic and self_supported:
-            return self._mk_result(
-                stance=stance,
-                alignment='SAME',
-                concession=False,
-                reason='thesis_support',
-                pair_scores=self_scores,
-                thesis_scores=self_scores,
-                user_txt=user_txt,
-                bot_txt=bot_txt,
-                topic=clean_topic,
-            )
-
-        # C) Too short blocks other concessions (except A)
-        if user_wc < min_user_words:
-            return self._mk_result(
-                stance=stance,
-                alignment='UNKNOWN',
-                concession=False,
-                reason='too_short',
-                pair_scores=best_pair_scores or self_scores,
-                thesis_scores=self_scores,
-                user_txt=user_txt,
-                bot_txt=bot_txt,
-                topic=clean_topic,
-            )
-
-        # D) Off-topic blocks pairwise fallback
-        if not on_topic:
-            return self._mk_result(
-                stance=stance,
-                alignment='UNKNOWN',
-                concession=False,
-                reason='off_topic',
-                pair_scores=best_pair_scores or self_scores,
-                thesis_scores=self_scores,
-                user_txt=user_txt,
-                bot_txt=bot_txt,
-                topic=clean_topic,
-            )
-
-        # E) Pairwise contradiction fallback (soft) → concede
-        if engaged and best_contra >= pair_soft:
-            return self._mk_result(
-                stance=stance,
-                alignment='OPPOSITE',
-                concession=True,
-                reason='pairwise_opposition_soft',
-                pair_scores=best_pair_scores,
-                thesis_scores=self_scores,
-                user_txt=user_txt,
-                bot_txt=bot_txt,
-                topic=clean_topic,
-            )
-
-        # F) Otherwise unknown / underdetermined
-        return self._mk_result(
-            stance=stance,
-            alignment='UNKNOWN',
-            concession=False,
-            reason='underdetermined',
-            pair_scores=best_pair_scores or self_scores,
-            thesis_scores=self_scores,
-            user_txt=user_txt,
-            bot_txt=bot_txt,
-            topic=clean_topic,
+        payload = NLIJudgePayload(
+            topic=thesis,
+            stance=('pro' if stance == Stance.PRO else 'con'),
+            user_text=user_txt,
+            bot_text=bot_txt,
+            thesis_scores={
+                'entailment': float(thesis_agg.get('entailment', 0.0)),
+                'contradiction': float(thesis_agg.get('contradiction', 0.0)),
+                'neutral': float(thesis_agg.get('neutral', 0.0)),
+            },
+            pair_best={
+                'entailment': float(pair_agg.get('entailment', 0.0)),
+                'contradiction': float(pair_agg.get('contradiction', 0.0)),
+                'neutral': float(pair_agg.get('neutral', 0.0)),
+            },
+            max_sent_contra=float(max_sent_contra),
+            on_topic=bool(on_topic),
+            user_wc=int(user_wc),
         )
+        return payload, user_txt, bot_txt
 
     # ----------------------------- helpers -----------------------------
 
     @staticmethod
-    def _topic_statement(clean_topic: str) -> str:
-        return clean_topic.rstrip('.') + '.'
+    def _map_history(messages: List[Message]) -> List[dict]:
+        return [
+            {'role': ('assistant' if m.role == 'bot' else 'user'), 'content': m.message}
+            for m in messages
+        ]
+
+    @staticmethod
+    def _last_index(
+        convo: List[dict],
+        role: str,
+        predicate=None,
+        before: Optional[int] = None,
+    ) -> Optional[int]:
+        end = (before if before is not None else len(convo)) - 1
+        for i in range(end, -1, -1):
+            if convo[i].get('role') != role:
+                continue
+            if predicate and not predicate(convo[i]):
+                continue
+            return i
+        return None
 
     def _extract_claims(self, bot_txt: str) -> List[str]:
-        """
-        Extract assertive sentences from the assistant's last reply.
-        Drop questions and pure acknowledgments.
-        """
         if not bot_txt:
             return []
         parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', bot_txt) if p.strip()]
@@ -375,94 +364,13 @@ class ConcessionService:
         logger.debug('[topic] on_topic=%s | agg=%s', on, round3(agg_max(thesis_scores)))
         return on
 
-    @staticmethod
-    def _polarity_variants(t: str) -> Tuple[str, str]:
-        t0 = (t or '').strip().rstrip('.')
-        tl = t0.lower()
-
-        # exists ↔ does not exist
-        m = re.match(r'^(.+?)\s+do(?:es)?\s+not\s+exist$', tl, flags=re.I)
-        if m:
-            subj = t0[: t0.lower().rfind(' does not exist')].strip()
-            return f'{subj} exists.', f'{subj} does not exist.'
-        m = re.match(r"^(.+?)\s+doesn'?t\s+exist$", tl, flags=re.I)
-        if m:
-            subj = t0[: t0.lower().rfind(" doesn't exist")].strip()
-            return f'{subj} exists.', f'{subj} does not exist.'
-        m = re.match(r'^(.+?)\s+exists$', tl, flags=re.I)
-        if m:
-            subj = t0[: t0.lower().rfind(' exists')].strip()
-            return f'{subj} exists.', f'{subj} does not exist.'
-
-        # are not / are
-        m = re.match(r'^(?P<subj>.+?)\s+are\s+not\s+(?P<pred>.+)$', t0, flags=re.I)
-        if m:
-            subj, pred = m.group('subj').strip(), m.group('pred').strip()
-            return f'{subj} are {pred}.', f'{subj} are not {pred}.'
-        m = re.match(r'^(?P<subj>.+?)\s+are\s+(?P<pred>.+)$', t0, flags=re.I)
-        if m:
-            subj, pred = m.group('subj').strip(), m.group('pred').strip()
-            return f'{subj} are {pred}.', f'{subj} are not {pred}.'
-
-        # is not / is
-        m = re.match(r'^(?P<subj>.+?)\s+is\s+not\s+(?P<pred>.+)$', t0, flags=re.I)
-        if m:
-            subj, pred = m.group('subj').strip(), m.group('pred').strip()
-            return f'{subj} is {pred}.', f'{subj} is not {pred}.'
-        m = re.match(r'^(?P<subj>.+?)\s+is\s+(?P<pred>.+)$', t0, flags=re.I)
-        if m:
-            subj, pred = m.group('subj').strip(), m.group('pred').strip()
-            return f'{subj} is {pred}.', f'{subj} is not {pred}.'
-
-        # fallback
-        pos = t0 + '.'
-        neg = f'It is not the case that {t0}.'
-        return pos, neg
-
-    @staticmethod
-    def _canonical_stance(topic_clean: str, bot_stance: Stance) -> str:
-        pos, neg = ConcessionService._polarity_variants(topic_clean)
-        return pos if bot_stance == Stance.PRO else neg
-
-    # ----------------------------- pack result -----------------------------
-
-    @staticmethod
-    def _mk_result(
-        stance: Stance,
-        alignment: str,
-        concession: bool,
-        reason: str,
-        pair_scores: Dict[str, Dict[str, float]],
-        thesis_scores: Dict[str, Dict[str, float]],
-        user_txt: str,
-        bot_txt: str,
-        topic: str,
-    ) -> Dict[str, Any]:
-        return {
-            'passed_stance': stance.value,
-            'alignment': alignment,
-            'concession': concession,
-            'reason': reason,
-            'reasons': [reason],
-            'scores': agg_max(pair_scores),
-            'thesis_scores': agg_max(thesis_scores),
-            'user_text_sample': user_txt,
-            'bot_text_sample': bot_txt,
-            'topic': topic,
-        }
-
     def _max_contra_self_vs_sentences(
-        self, canon_self: str, user_txt: str
+        self, self_thesis: str, user_txt: str
     ) -> Tuple[float, float, Dict[str, Dict[str, float]]]:
-        """
-        Scan user sentences against the canonical self-thesis and return:
-          (max_contradiction, entailment_at_that_sentence, scores_for_that_sentence)
-        If no sentences are found, returns (0.0, 0.0, {}).
-        """
-        if not user_txt or not canon_self:
+        if not user_txt or not self_thesis:
+            logger.debug('[sent_scan] empty inputs')
             return 0.0, 0.0, {}
 
-        # Split into sentences; drop pure questions
         parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', user_txt) if p.strip()]
         sentences: List[str] = []
         for s in parts:
@@ -476,9 +384,8 @@ class ConcessionService:
         max_contra = 0.0
         ent_at_max = 0.0
         scores_at_max: Dict[str, Dict[str, float]] = {}
-
         for s in sentences:
-            sc = self.nli.bidirectional_scores(canon_self, s)
+            sc = self.nli.bidirectional_scores(self_thesis, s)
             agg = agg_max(sc)
             ent = float(agg.get('entailment', 0.0))
             con = float(agg.get('contradiction', 0.0))
@@ -487,4 +394,10 @@ class ConcessionService:
                 ent_at_max = ent
                 scores_at_max = sc
 
+        logger.debug(
+            '[sent_scan] sentences=%d | max_contra=%.3f ent_at_max=%.3f',
+            len(sentences),
+            max_contra,
+            ent_at_max,
+        )
         return max_contra, ent_at_max, scores_at_max

@@ -26,7 +26,7 @@ class FakeLLM:
       - nli_judge(payload=...) returns a configured decision dict
     """
 
-    def __init__(self, decision: Dict[str, Any] | None = None):
+    def __init__(self, decision: Dict[str, Any] = None):
         # Default: concession with high confidence
         self.decision = decision or {
             'verdict': 'OPPOSITE',
@@ -34,7 +34,7 @@ class FakeLLM:
             'confidence': 0.87,
             'reason': 'thesis_opposition_strong',
         }
-        self.last_payload: Dict[str, Any] | None = None
+        self.last_payload: Dict[str, Any]
 
     async def debate(self, messages, state=None):
         return 'fake-llm-reply'
