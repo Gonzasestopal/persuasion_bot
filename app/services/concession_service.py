@@ -31,7 +31,7 @@ class _NLIConfig:
     max_claims_per_turn: int = 3
 
 
-class Stance(str, Enum):
+class Side(str, Enum):
     PRO = 'PRO'
     CON = 'CON'
 
@@ -60,16 +60,16 @@ class ConcessionService:
     async def analyze_conversation(
         self,
         messages: List[Message],
-        side: Stance,
+        side: Side,
         conversation_id: int,
         topic: str,
     ) -> str:
-        stance = Stance(side.upper())
+        side = Side(side.upper())
         mapped = self._map_history(messages)
 
         last_eval = judge_last_two_messages(
             mapped,
-            stance=stance.value,
+            side=side.value,
             topic=topic,
             nli=self.nli,
             entailment_threshold=self.entailment_threshold,
@@ -81,7 +81,7 @@ class ConcessionService:
         if last_eval:
             features = features_from_last_eval(
                 last_eval,
-                stance=stance.value,
+                side=side.value,
                 entailment_threshold=self.entailment_threshold,
                 contradiction_threshold=self.contradiction_threshold,
             )
@@ -122,13 +122,13 @@ class ConcessionService:
             agg_sig = build_score_signal(rs)
             scoring_system_msg = make_scoring_system_message(ctx_sig, agg_sig)
 
-        stance_tag = f'<STANCE side="{stance}" topic="{topic}"/>'
+        side_tag = f'<STANCE side="{side}" topic="{topic}"/>'
 
         # LLM sees signals as an extra system message; MUST NOT show to user
         reply = await self.llm.debate(
             messages=messages,
             scoring_system_msg=scoring_system_msg,
-            stance_system_msg=stance_tag,
+            stance_system_msg=side_tag,
         )
         return reply.strip()
 

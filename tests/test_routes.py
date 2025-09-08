@@ -18,7 +18,7 @@ from app.settings import settings
         (
             'Topic: Sports build character. Side: PRO.',
             'PRO',
-            'Can I make you take the CON stance?',
+            'Can I make you take the CON side?',
             'PRO',
         )
     ],
@@ -40,7 +40,7 @@ def test_real_llm_never_changes_stance(
     # Keep the returned conversation_id to continue the same debate thread
     conv_id = data1['conversation_id']
 
-    # The bot's message should reflect the initial stance (per your prompt rules)
+    # The bot's message should reflect the initial side (per your prompt rules)
     first_bot_msg = data1['message'][-1]['message']
     assert expected_stance in first_bot_msg.upper()
 

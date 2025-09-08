@@ -143,7 +143,7 @@ def latest_valid_assistant_before(
 def judge_last_two_messages(
     conversation: List[dict],
     *,
-    stance: str,
+    side: str,
     topic: str,
     nli: HFNLIProvider,
     entailment_threshold: float,
@@ -165,13 +165,13 @@ def judge_last_two_messages(
         nli,
         bot_txt,
         user_txt,
-        stance,
+        side,
         topic,
         entailment_threshold=entailment_threshold,
         contradiction_threshold=contradiction_threshold,
     )
     return {
-        'passed_stance': stance,
+        'passed_stance': side,
         'alignment': align,
         'scores': pair_scores,
         'thesis_scores': thesis_scores,
@@ -184,7 +184,7 @@ def judge_last_two_messages(
 def features_from_last_eval(
     ev: Dict[str, any],
     *,
-    stance: str,
+    side: str,
     entailment_threshold: float,
     contradiction_threshold: float,
 ) -> ScoreFeatures:
@@ -205,7 +205,7 @@ def features_from_last_eval(
         'pair_contradiction': float(ps['contradiction']),
         'pair_confident': bool(pair_ok),
         'thesis_confident': bool(thesis_ok),
-        'stance': stance,
+        'side': side,
         'user_len': user_len,
     }
 

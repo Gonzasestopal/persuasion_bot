@@ -57,15 +57,15 @@ def test_drop_questions_removes_interrogatives_and_keeps_statements():
 
 
 @pytest.mark.parametrize(
-    'topic,stance,expected',
+    'topic,side,expected',
     [
         ('Dogs are best', 'PRO', 'Dogs are best.'),
         ('Dogs are best.', 'PRO', 'Dogs are best.'),
         ('Dogs are best', 'CON', 'It is not true that Dogs are best.'),
     ],
 )
-def test_bot_thesis(topic, stance, expected):
-    assert bot_thesis(topic, stance) == expected
+def test_bot_thesis(topic, side, expected):
+    assert bot_thesis(topic, side) == expected
 
 
 @pytest.mark.parametrize(
@@ -151,7 +151,7 @@ def test_alignment_and_scores_topic_aware_paths():
 async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
     nli = _FakeNLI()
     topic = 'Dogs are the best human companion'
-    stance = 'PRO'
+    side = 'PRO'
 
     # Build a conversation with a valid assistant turn (>= 10 alpha words)
     bot_text = (
@@ -170,7 +170,7 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
 
     ev = judge_last_two_messages(
         conv,
-        stance=stance,
+        side=side,
         topic=topic,
         nli=nli,
         entailment_threshold=ENT_THR,
@@ -178,13 +178,13 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
     )
     assert ev is not None
     assert ev['topic'] == topic
-    assert ev['passed_stance'] == stance
+    assert ev['passed_stance'] == side
     assert 'scores' in ev and 'thesis_scores' in ev
     assert ev['user_text_sample'].startswith('I OPPOSE')
 
     # features
     feats = features_from_last_eval(
-        ev, stance=stance, entailment_threshold=ENT_THR, contradiction_threshold=CON_THR
+        ev, side=side, entailment_threshold=ENT_THR, contradiction_threshold=CON_THR
     )
     # minimal shape checks
     for k in (
@@ -196,7 +196,7 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
         'pair_contradiction',
         'pair_confident',
         'thesis_confident',
-        'stance',
+        'side',
         'user_len',
     ):
         assert k in feats
@@ -220,7 +220,7 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
     }
     ev2 = judge_last_two_messages(
         conv,
-        stance=stance,
+        side=side,
         topic=topic,
         nli=nli,
         entailment_threshold=ENT_THR,
@@ -238,7 +238,7 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
     conv[-1] = {'role': 'user', 'content': 'I OPPOSE your framing on pairwise only.'}
     ev3 = judge_last_two_messages(
         conv,
-        stance=stance,
+        side=side,
         topic=topic,
         nli=nli,
         entailment_threshold=ENT_THR,
@@ -263,7 +263,7 @@ async def test_judge_last_two_messages_and_features_and_deterministic_verdict():
     conv[-1] = {'role': 'user', 'content': 'This feels nuanced and context dependent.'}
     ev4 = judge_last_two_messages(
         conv,
-        stance=stance,
+        side=side,
         topic=topic,
         nli=nli,
         entailment_threshold=ENT_THR,

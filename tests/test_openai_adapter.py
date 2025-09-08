@@ -1,6 +1,5 @@
 # tests/test_openai_score_judge.py
 import json
-import re
 
 import pytest
 
@@ -49,14 +48,18 @@ def _get_messages(sent_kwargs):
     Return the list of messages sent to the API, regardless of whether the
     adapter used the Responses API ("input") or Chat Completions-style ("messages").
     """
-    if "input" in sent_kwargs:
-        msgs = sent_kwargs["input"]
-    elif "messages" in sent_kwargs:
-        msgs = sent_kwargs["messages"]
+    if 'input' in sent_kwargs:
+        msgs = sent_kwargs['input']
+    elif 'messages' in sent_kwargs:
+        msgs = sent_kwargs['messages']
     else:
-        raise AssertionError(f"Expected 'input' or 'messages' in kwargs. Got keys: {list(sent_kwargs.keys())}")
+        raise AssertionError(
+            f"Expected 'input' or 'messages' in kwargs. Got keys: {list(sent_kwargs.keys())}"
+        )
 
-    assert isinstance(msgs, list) and len(msgs) >= 2, "Expected at least system + user messages"
+    assert isinstance(msgs, list) and len(msgs) >= 2, (
+        'Expected at least system + user messages'
+    )
     return msgs
 
 
@@ -65,14 +68,14 @@ def _find_system_and_user(msgs):
     Find first system and last user message (typical pattern: system first, user second).
     Be tolerant if order changes slightly.
     """
-    sys_msg = next((m for m in msgs if m.get("role") == "system"), None)
+    sys_msg = next((m for m in msgs if m.get('role') == 'system'), None)
     usr_msg = None
     for m in reversed(msgs):
-        if m.get("role") == "user":
+        if m.get('role') == 'user':
             usr_msg = m
             break
-    assert sys_msg is not None, "No system message found"
-    assert usr_msg is not None, "No user message found"
+    assert sys_msg is not None, 'No system message found'
+    assert usr_msg is not None, 'No user message found'
     return sys_msg, usr_msg
 
 
@@ -81,10 +84,10 @@ def _content_str(msg):
     Some SDKs allow content to be string or list of parts.
     We coerce to a flat string for assertions.
     """
-    c = msg.get("content", "")
+    c = msg.get('content', '')
     if isinstance(c, list):
         # concatenate plain text parts
-        return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in c)
+        return ''.join(p.get('text', '') if isinstance(p, dict) else str(p) for p in c)
     return str(c)
 
 
@@ -97,22 +100,28 @@ def _json_equal_or_wrapped(user_content_str, expected_payload: dict):
     try:
         parsed = json.loads(user_content_str)
     except Exception as e:
-        raise AssertionError(f"User content is not valid JSON: {user_content_str}") from e
+        raise AssertionError(
+            f'User content is not valid JSON: {user_content_str}'
+        ) from e
 
     if parsed == expected_payload:
         return True
 
     # common wrappers
-    for k in ("features", "data", "payload"):
+    for k in ('features', 'data', 'payload'):
         inner = parsed.get(k) if isinstance(parsed, dict) else None
         if inner == expected_payload:
             return True
 
     # Otherwise, allow superset with the same keys/values for the expected payload
-    if isinstance(parsed, dict) and all(k in parsed and parsed[k] == v for k, v in expected_payload.items()):
+    if isinstance(parsed, dict) and all(
+        k in parsed and parsed[k] == v for k, v in expected_payload.items()
+    ):
         return True
 
-    raise AssertionError(f"JSON payload mismatch.\nExpected (or wrapped): {expected_payload}\nGot: {parsed}")
+    raise AssertionError(
+        f'JSON payload mismatch.\nExpected (or wrapped): {expected_payload}\nGot: {parsed}'
+    )
 
 
 # ---------- Fixtures ----------
@@ -152,7 +161,7 @@ def sample_features() -> ScoreFeatures:
         'pair_contradiction': 0.78,
         'pair_confident': True,
         'thesis_confident': True,
-        'stance': 'PRO',
+        'side': 'PRO',
         'user_len': 120,
     }
 
@@ -192,11 +201,15 @@ async def test_score_success_parses_json_and_builds_request(
 
     sys_content = _content_str(sys_msg).lower()
     # only check that it's clearly a meta-judge prompt
-    assert any(tok in sys_content for tok in ('meta-judge', 'score judge', 'scoring')), sys_content
+    assert any(
+        tok in sys_content for tok in ('meta-judge', 'score judge', 'scoring')
+    ), sys_content
 
     user_content = _content_str(usr_msg)
     # user message should serialize the features as compact JSON or a wrapped object containing them
-    expected_user_compact = json.dumps(sample_features, ensure_ascii=False, separators=(',', ':'))
+    expected_user_compact = json.dumps(
+        sample_features, ensure_ascii=False, separators=(',', ':')
+    )
     # accept exact match OR JSON-equal/wrapped
     if user_content != expected_user_compact:
         _json_equal_or_wrapped(user_content, sample_features)
@@ -208,7 +221,7 @@ async def test_score_success_parses_json_and_builds_request(
     name = js.get('name') or ''
     assert name == _JSON_SCHEMA['name'] or name.startswith(_JSON_SCHEMA['name'])
     schema = js.get('schema') or {}
-    props = (schema.get('properties') or {})
+    props = schema.get('properties') or {}
     for k in ('alignment', 'concession', 'confidence'):
         assert k in props, f"Missing '{k}' in response schema properties"
 
@@ -240,6 +253,8 @@ async def test_score_minimal_features_still_serializes(judge, fake_openai):
     user_content = _content_str(usr_msg)
 
     # If it's exactly the compact JSON, fine; otherwise ensure it's valid JSON and contains our keys/values.
-    expected_user_compact = json.dumps(minimal, ensure_ascii=False, separators=(',', ':'))
+    expected_user_compact = json.dumps(
+        minimal, ensure_ascii=False, separators=(',', ':')
+    )
     if user_content != expected_user_compact:
         _json_equal_or_wrapped(user_content, minimal)
