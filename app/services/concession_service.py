@@ -110,8 +110,10 @@ class ConcessionService:
         )
 
         if state.match_concluded:
-            logger.debug('[analyze] match already concluded → after_end_message')
-            return after_end_message(state=state)
+            logger.debug(
+                '[analyze] match already concluded → returning stored end reply'
+            )
+            return state.end_assistant_reply or after_end_message(state=state)
 
         mapped = self._map_history(messages)
         logger.debug('[analyze] mapped_history=%d', len(mapped))
@@ -124,15 +126,11 @@ class ConcessionService:
             state=state,
         )
 
-        print(payload)
-
         if payload is not None:
             payload_dict = (
                 payload.to_dict() if hasattr(payload, 'to_dict') else asdict(payload)
             )
-            print('ok')
             decision = await self.judge.nli_judge(payload=payload_dict)
-            print('rip')
             accept = bool(decision.accept)
             ended = bool(decision.ended)
             reason = decision.reason or 'llm_judge'
@@ -160,10 +158,20 @@ class ConcessionService:
                 )
 
             if ended:
+                # If judge returned the sentinel, convert it to a short human closing using the reason
+                if assistant_reply.strip() == '<DEBATE_ENDED>':
+                    assistant_reply = f'Debate concluded: {reason.replace("_", " ")}.'
+
                 state.match_concluded = True
+                state.end_reason = reason
+                state.end_assistant_reply = assistant_reply
+
                 self.debate_store.save(conversation_id=conversation_id, state=state)
-                logger.debug('[analyze] concluded via judge → returning judge reply')
-                return assistant_reply or '<DEBATE_ENDED>'
+                logger.debug(
+                    '[analyze] concluded via judge → returning assistant_reply | reason=%s',
+                    reason,
+                )
+                return assistant_reply
 
             if assistant_reply:
                 state.assistant_turns += 1
@@ -277,7 +285,7 @@ class ConcessionService:
 
         payload = NLIJudgePayload(
             topic=thesis,
-            stance='pro',
+            stance=stance,
             language=state.lang,
             turn_index=state.assistant_turns,
             user_text=user_txt,

@@ -36,6 +36,9 @@ class DebateState:
     match_concluded: bool = False
     lang_locked: bool = False  # once True, never auto-change
 
+    end_reason: str = ''
+    ended_by: str = ''  # e.g. 'judge', 'policy:max_turns', 'policy:points'
+
     def maybe_conclude(self) -> bool:
         """
         End the debate if:
@@ -52,8 +55,10 @@ class DebateState:
         return False
 
     # ---------- Mutation helpers ----------
-    def mark_concluded(self) -> None:
+    def mark_concluded(self, *, reason: str, by: str) -> None:
         self.match_concluded = True
+        self.end_reason = reason
+        self.ended_by = by
 
     # ---------- Prompt wiring ----------
     def to_prompt_vars(self) -> Dict[str, str]:
