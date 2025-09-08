@@ -1,3 +1,10 @@
+## v1.12.1 (2025-09-08)
+
+### Refactor
+
+- split concession into services
+- debate store into orchestrator
+
 ## v1.12.0 (2025-09-08)
 
 ### Feat
