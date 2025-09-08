@@ -99,3 +99,12 @@ def get_topic_checker_singleton() -> LLMPort:
 
 def get_topic_checker() -> LLMPort:
     return make_claude()
+
+
+@lru_cache(maxsize=1)
+def get_judge_singleton() -> LLMPort:
+    return get_judge()
+
+
+def get_judge() -> LLMPort:
+    return make_claude()

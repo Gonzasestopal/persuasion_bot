@@ -1,7 +1,8 @@
 # app/services/concession_service.py
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import asdict
+from typing import Dict, List, Optional, Tuple
 
 from app.domain.enums import Stance
 from app.domain.models import Message
@@ -28,18 +29,12 @@ logger.setLevel(logging.DEBUG)
 
 class ConcessionService:
     """
-    Assumptions:
-      - Topic gate upstream ensured debate-ready normalized `topic` and final `stance`.
-      - This service computes NLI evidence and asks the LLM Judge for the FINAL decision.
-      - The judge returns: accept|ended|reason|assistant_reply|confidence.
-      - We write per-turn control flags into DebateState:
-          state.user_point_decision ∈ {"ACCEPT","REJECT"}
-          state.user_point_reason   ∈ short snake_case
-      - No scoreboard rendering here; ending is signaled by returning the judge reply
-        (which SHOULD be "<DEBATE_ENDED>" per your AWARE prompt rules when ended).
+    - Topic gate upstream ensured normalized `topic` and final `stance`.
+    - This service computes NLI evidence and asks the LLM Judge for the FINAL decision.
+    - The judge returns: accept|ended|reason|assistant_reply|confidence.
+    - No scoreboard rendering here; if judge ends, we return its reply (e.g. "<DEBATE_ENDED>").
     """
 
-    # Acknowledgement-style sentence starts that shouldn't be treated as claims
     ACK_PREFIXES = (
         'thanks',
         'thank you',
@@ -50,7 +45,6 @@ class ConcessionService:
         'understand',
     )
 
-    # Meta stance banners to exclude from claim extraction (multi-lingual variants)
     STANCE_BANNERS = (
         'i will gladly take the pro stance',
         'i will gladly take the con stance',
@@ -66,20 +60,27 @@ class ConcessionService:
     def __init__(
         self,
         llm: LLMPort,
-        nli: Optional[NLIPort] = None,
+        nli: NLIPort,
+        judge: LLMPort,
+        debate_store: DebateStorePort,
         nli_config: Optional[NLIConfig] = None,
         scoring: Optional[ScoringConfig] = None,
-        debate_store: Optional[DebateStorePort] = None,
         *,
         llm_judge_min_confidence: float = 0.70,
     ) -> None:
+        if llm is None:
+            raise ValueError('ConcessionService requires an LLMPort')
+        if nli is None:
+            raise ValueError('ConcessionService requires an NLIPort')
+        if debate_store is None:
+            raise ValueError('ConcessionService requires a DebateStorePort')
+
         self.llm = llm
         self.nli = nli
+        self.judge = judge
         self.debate_store = debate_store
         self.nli_config = nli_config or NLIConfig()
         self.scoring = scoring or ScoringConfig()
-
-        # LLM judge confidence gate (applied here if you want to gate effects)
         self.llm_judge_min_confidence = float(llm_judge_min_confidence)
 
     # ----------------------------- public API -----------------------------
@@ -87,7 +88,7 @@ class ConcessionService:
     async def analyze_conversation(
         self,
         messages: List[Message],
-        stance: Stance,  # kept for compatibility; state is authoritative
+        stance: Stance,
         conversation_id: int,
         topic: str,
     ) -> str:
@@ -97,14 +98,14 @@ class ConcessionService:
                 f'DebateState missing for conversation_id={conversation_id}'
             )
 
-        topic_clean: str = getattr(state, 'topic', topic)
+        topic_clean: str = state.topic
 
         logger.debug(
             '[analyze] conv_id=%s stance=%s topic=%s | turns=%d msgs=%d',
             conversation_id,
-            stance,
+            stance.value,
             trunc(topic_clean),
-            getattr(state, 'assistant_turns', 0),
+            state.assistant_turns,
             len(messages),
         )
 
@@ -123,19 +124,15 @@ class ConcessionService:
             state=state,
         )
 
-        # ---- Compute NLI evidence & call the LLM Judge (primary) ----
-        judge_concession = False
+        print(payload)
 
-        payload, user_txt, bot_txt = self._build_llm_judge_payload(
-            conversation=mapped,
-            stance=stance,
-            topic=topic_clean,
-        )
         if payload is not None:
-            # Adapter owns the prompt + result dataclass; we accept object or dict.
-            decision = await self.llm.nli_judge(payload=payload.to_dict())
-
-            # Expecting adapter to have validated these fields already
+            payload_dict = (
+                payload.to_dict() if hasattr(payload, 'to_dict') else asdict(payload)
+            )
+            print('ok')
+            decision = await self.judge.nli_judge(payload=payload_dict)
+            print('rip')
             accept = bool(decision.accept)
             ended = bool(decision.ended)
             reason = decision.reason or 'llm_judge'
@@ -150,9 +147,6 @@ class ConcessionService:
                 reason,
             )
 
-            # record per-turn signal
-            state.set_user_point('ACCEPT' if accept else 'REJECT', reason)
-
             # confidence-gated tally
             if accept and confidence >= self.llm_judge_min_confidence:
                 state.positive_judgements += 1
@@ -160,19 +154,17 @@ class ConcessionService:
                     "[concession] conv_id=%s +1 (total=%s) reason=%s | user='%s' | bot='%s'",
                     conversation_id,
                     state.positive_judgements,
-                    (reason or 'llm_judge'),
+                    reason,
                     trunc(user_txt, 80),
                     trunc(bot_txt, 80),
                 )
 
-            # If judge says end → mark and return the judge reply (should be "<DEBATE_ENDED>")
             if ended:
                 state.match_concluded = True
                 self.debate_store.save(conversation_id=conversation_id, state=state)
                 logger.debug('[analyze] concluded via judge → returning judge reply')
                 return assistant_reply or '<DEBATE_ENDED>'
 
-            # Not ended: advance turn, persist, and return judge-provided reply
             if assistant_reply:
                 state.assistant_turns += 1
                 self.debate_store.save(conversation_id=conversation_id, state=state)
@@ -183,7 +175,6 @@ class ConcessionService:
                 )
                 return sanitize_end_markers(assistant_reply).strip()
 
-            # If judge gave no reply (shouldn’t happen), fall through to generator.
             logger.debug(
                 '[llm_judge] empty assistant_reply → falling back to generator'
             )
@@ -193,10 +184,10 @@ class ConcessionService:
             )
 
         # ---- Fallback: generate with the assistant ----
-        reply = await self.llm.debate(messages=messages, state=state)
+        # NOTE: adapter.debate(...) currently takes only messages
+        reply = await self.llm.debate(messages=messages)
         reply = sanitize_end_markers(reply).strip()
 
-        # Update turn count and (maybe) conclude once
         state.assistant_turns += 1
         self.debate_store.save(conversation_id=conversation_id, state=state)
         logger.debug('[analyze] returning generated reply (len=%d)', len(reply))
@@ -214,9 +205,7 @@ class ConcessionService:
     ) -> Tuple[Optional[NLIJudgePayload], str, str]:
         """
         Build the evidence payload expected by the adapter's LLM Judge.
-
         Returns: (payload_or_None, user_text, bot_text)
-                 payload_or_None is None if context is insufficient.
         """
         if not conversation:
             logger.debug('[payload] empty conversation')
@@ -227,7 +216,7 @@ class ConcessionService:
             logger.debug('[payload] no user message found')
             return None, '', ''
 
-        min_asst_words = getattr(self.scoring, 'min_assistant_words', 10)
+        min_asst_words = self.scoring.min_assistant_words
         bot_idx = self._last_index(
             conversation,
             role='assistant',
@@ -251,7 +240,7 @@ class ConcessionService:
             logger.debug('[payload] empty thesis')
             return None, '', ''
 
-        # Thesis-level NLI (assistant thesis vs user text)
+        # Thesis-level NLI
         self_scores = self.nli.bidirectional_scores(thesis, user_clean)
         thesis_agg = agg_max(self_scores)
         on_topic = self._on_topic_from_scores(self_scores)
@@ -259,17 +248,16 @@ class ConcessionService:
             '[payload] thesis_agg=%s | on_topic=%s', round3(thesis_agg), on_topic
         )
 
-        # Sentence scan (max contradiction for any user sentence)
+        # Sentence scan (max contradiction)
         max_sent_contra, _max_ent, _scores_at_max = self._max_contra_self_vs_sentences(
             thesis, user_txt
         )
         logger.debug('[payload] max_sent_contra=%.3f', max_sent_contra)
 
-        # Pairwise best: extract claims from assistant prior turn and score vs user
+        # Pairwise best
         claims = self._extract_claims(bot_txt)
         if claims:
             claim_scores = self._claim_scores(claims, user_clean)
-            # choose by highest contradiction signal
             best_claim, _ent, best_contra, best_rel, best_pair_scores = max(
                 claim_scores, key=lambda t: t[2]
             )
@@ -289,7 +277,7 @@ class ConcessionService:
 
         payload = NLIJudgePayload(
             topic=thesis,
-            stance=('pro' if stance == Stance.PRO else 'con'),
+            stance='pro',
             language=state.lang,
             turn_index=state.assistant_turns,
             user_text=user_txt,
@@ -344,10 +332,6 @@ class ConcessionService:
         return None
 
     def _extract_claims(self, bot_txt: str) -> List[str]:
-        """
-        Extract declarative, substantive claims from the assistant's prior turn,
-        excluding questions, acknowledgements, and meta stance banners.
-        """
         if not bot_txt:
             return []
         parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', bot_txt) if p.strip()]
@@ -361,11 +345,8 @@ class ConcessionService:
                 continue
             s2_l = s2.lower()
 
-            # Skip soft acknowledgements
             if any(s2_l.startswith(prefix) for prefix in self.ACK_PREFIXES):
                 continue
-
-            # Skip stance/meta banners anywhere in the sentence
             if any(b in s2_l for b in self.STANCE_BANNERS):
                 skipped_banners += 1
                 continue
@@ -390,7 +371,7 @@ class ConcessionService:
             ent = float(agg.get('entailment', 0.0))
             con = float(agg.get('contradiction', 0.0))
             neu = float(agg.get('neutral', 1.0))
-            rel = max(ent, con, 1.0 - neu)  # relatedness proxy
+            rel = max(ent, con, 1.0 - neu)
             out.append((c, ent, con, rel, sc))
         return out
 

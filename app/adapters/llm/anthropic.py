@@ -210,14 +210,16 @@ class AnthropicAdapter(LLMPort):
     async def nli_judge(self, *, payload: Jsonable) -> JudgeResult:
         """
         Calls the judge with the NLI payload and returns a structured JudgeResult:
-          - accept: bool
-          - ended: bool
-          - reason: str
-          - assistant_reply: str
-          - confidence: float (0..1)
+        - accept: bool
+        - ended: bool
+        - reason: str
+        - assistant_reply: str
+        - confidence: float (0..1)
         Raises ValueError on invalid responses.
         """
         user_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+
+        logger.debug('[nli_judge] sending payload=%s', user_text)
 
         resp = await self.client.messages.create(
             model=self.model,
@@ -233,16 +235,20 @@ class AnthropicAdapter(LLMPort):
         )
 
         out = self._parse_single_text(resp).strip()
+        logger.debug('[nli_judge] raw LLM output=%r', out)
+
         try:
             obj = json.loads(out)
         except json.JSONDecodeError as e:
+            logger.error('[nli_judge] JSON decode failed: %s | output=%r', e, out)
             raise ValueError(f'LLM judge returned non-JSON: {out!r}') from e
 
         if not isinstance(obj, dict):
+            logger.error('[nli_judge] Expected dict, got %s', type(obj))
             raise ValueError('LLM judge: non-object JSON')
 
-        # Required fields
         if 'assistant_reply' not in obj or 'reason' not in obj:
+            logger.error('[nli_judge] Missing required fields in obj=%s', obj)
             raise ValueError('LLM judge: missing assistant_reply or reason')
 
         accept = bool(obj.get('accept', False))
@@ -252,18 +258,33 @@ class AnthropicAdapter(LLMPort):
         try:
             confidence = float(obj.get('confidence', 0.0))
         except (TypeError, ValueError):
+            logger.warning(
+                '[nli_judge] Invalid confidence value=%s, defaulting to 0.0',
+                obj.get('confidence'),
+            )
             confidence = 0.0
 
-        # Basic validation
         if not assistant_reply or not reason:
+            logger.error('[nli_judge] Empty assistant_reply or reason in obj=%s', obj)
             raise ValueError('LLM judge: empty assistant_reply or reason')
         if confidence < 0.0 or confidence > 1.0:
+            logger.warning('[nli_judge] Confidence out of range: %s', confidence)
             confidence = max(0.0, min(1.0, confidence))
 
-        return JudgeResult(
+        result = JudgeResult(
             accept=accept,
             ended=ended,
             reason=reason,
             assistant_reply=assistant_reply,
             confidence=confidence,
         )
+
+        logger.debug(
+            '[nli_judge] parsed JudgeResult: accept=%s ended=%s reason=%s conf=%.2f',
+            result.accept,
+            result.ended,
+            result.reason,
+            result.confidence,
+        )
+
+        return result
