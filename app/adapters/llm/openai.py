@@ -35,7 +35,7 @@ class OpenAIAdapter(LLMPort):
         client: Optional[OpenAI] = None,
         model: OpenAIModels = OpenAIModels.GPT_4O,
         temperature: float = 0.3,
-        max_output_tokens: int = 80,
+        max_output_tokens: int = 160,
     ):
         self.client = client or OpenAI(api_key=api_key)
         self.model = model

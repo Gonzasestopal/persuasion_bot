@@ -8,7 +8,7 @@ from app.settings import settings
 @dataclass(frozen=True)
 class ConcessionPolicy:
     required_positive_judgements: int = settings.REQUIRED_POSITIVE_JUDGEMENTS
-    max_assistant_turns: int = 3  # hard cap on assistant turns
+    max_assistant_turns: int = 9  # hard cap on assistant turns
 
 
 DebateStatus = Literal['ONGOING', 'ENDED']
@@ -81,16 +81,20 @@ class DebateState:
     # ---------- Prompt wiring ----------
     def to_prompt_vars(self) -> Dict[str, str]:
         return {
-            'STANCE': self.stance,  # "pro" | "con"
-            'DEBATE_STATUS': self.debate_status,  # "ONGOING" | "ENDED"
+            'STANCE': self.stance,
+            'DEBATE_STATUS': self.debate_status,
             'TURN_INDEX': str(self.assistant_turns),
             'LANGUAGE': self.lang,
             'TOPIC': self.topic,
-            # pass judge info raw — debate prompt will humanize it
-            'JUDGE_ACCEPT': 'true' if self.last_judge_accept else 'false',
+            'JUDGE_ACCEPT': 'accept' if self.last_judge_accept else 'reject',
             'JUDGE_REASON_LABEL': self.last_judge_reason_label,
             'JUDGE_CONFIDENCE': f'{self.last_judge_confidence:.2f}',
             'END_REASON': self.end_reason or self.last_judge_reason_label or '',
+            'POSITIVE_JUDGEMENTS': str(self.positive_judgements),
+            'REQUIRED_POSITIVE_JUDGEMENTS': str(
+                self.policy.required_positive_judgements
+            ),
+            'MAX_ASSISTANT_TURNS': str(self.policy.max_assistant_turns),
         }
 
     # Handy for logging/debugging
