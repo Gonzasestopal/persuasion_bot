@@ -71,7 +71,6 @@ def client(service):
         with TestClient(app) as c:
             # Optional: also reset app.state in-mem stores so other code paths use the same fresh instances
             app.state.inmem_repo = service.repo
-            app.state.inmem_debate_store = service.debate_store
             yield c
     finally:
         app.dependency_overrides.clear()

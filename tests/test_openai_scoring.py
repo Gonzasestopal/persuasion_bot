@@ -4,7 +4,7 @@ import json
 import pytest
 
 from app.adapters.scoring.openai import _JSON_SCHEMA, OpenAIScoreJudge
-from app.domain.ports.score_judge import ScoreFeatures
+from app.domain.ports.scoring import ScoreFeatures
 
 # ---------- Fakes ----------
 
@@ -48,7 +48,7 @@ def fake_openai(monkeypatch):
     """
     Monkeypatch the OpenAI class inside the target module so the judge uses our fake client.
     """
-    import app.adapters.judge.openai_score_judge as target_mod
+    import app.adapters.scoring.openai as target_mod
 
     def _fake_ctor(*args, **kwargs):
         return _FakeOpenAIClient()

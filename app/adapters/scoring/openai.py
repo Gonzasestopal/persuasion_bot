@@ -4,7 +4,7 @@ from typing import Optional
 
 from openai import OpenAI
 
-from app.domain.ports.score_judge import ScoreFeatures, ScoreJudgePort, ScoreVerdict
+from app.domain.ports.scoring import ScoreFeatures, ScoreJudgePort, ScoreVerdict
 
 _SYSTEM = """You are a strict meta-judge. You must ONLY analyze the numeric features provided.
 Do not infer from missing text. Apply the following logic preferences:

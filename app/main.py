@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
@@ -30,8 +30,13 @@ async def lifespan(app: FastAPI):
     finally:
         pool = getattr(app.state, 'dbpool', None)
         if pool is not None:
-            await pool.close()
-            await pool.wait_closed()
+            # psycopg_pool.AsyncConnectionPool has async close(), no wait_closed()
+            with suppress(TypeError):
+                # some pools expose sync close(); call the async one first
+                await pool.close()
+            # for pools like asyncpg that expose wait_closed()
+            if hasattr(pool, 'wait_closed'):
+                await pool.wait_closed()
 
 
 app = FastAPI(lifespan=lifespan)
