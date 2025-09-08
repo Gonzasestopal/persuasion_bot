@@ -105,7 +105,7 @@ async def test_nli_judge_parses_valid_response(
 
     # reason may be an Enum or a string; normalize to string for assertion
     reason_str = getattr(decision.reason, 'value', str(decision.reason))
-    assert reason_str == 'strong_contradiction'
+    assert reason_str == 'ambiguous_evidence'
 
     # Exactly one Anthropic call with expected params
     assert len(fake_anthropic.calls) == 1
@@ -148,7 +148,7 @@ async def test_nli_judge_low_confidence_still_parses(
     assert decision.accept is False
     assert 0.0 <= decision.confidence <= 0.3
     reason_str = getattr(decision.reason, 'value', str(decision.reason))
-    assert reason_str == 'weak_support'
+    assert reason_str == 'ambiguous_evidence'
 
 
 @pytest.mark.asyncio

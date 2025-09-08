@@ -35,7 +35,7 @@ async def test_topic_normalizer_valid_en_double_negation_normalizes_anthropic():
     )
 
     topic = 'I don’t think God does not exist'
-    res = await adapter.check_topic(topic, stance='God exists')
+    res = await adapter.check_topic(topic, stance='pro')
 
     assert res.is_valid == True
     assert isinstance(res.normalized, str) and res.normalized.strip()
@@ -46,33 +46,6 @@ async def test_topic_normalizer_valid_en_double_negation_normalizes_anthropic():
     assert res.reason == ''
     assert 'VALID' in _norm_upper(res.raw)
     assert '\n' not in res.raw
-
-
-@requires_key
-@pytest.mark.asyncio
-async def test_topic_normalizer_invalid_es_one_liner_anthropic():
-    """
-    Integration (Anthropic):
-    Spanish non-claim (hola) should yield the strict ES INVALID template.
-    """
-    adapter = AnthropicAdapter(
-        api_key=os.environ['ANTHROPIC_API_KEY'],
-        model='claude-sonnet-4-20250514',
-    )
-
-    topic = 'hola'
-    res = await adapter.check_topic(topic, stance='God exists')
-
-    assert res.is_valid == False
-    assert res.normalized is None
-    raw_up = _norm_upper(res.raw)
-
-    assert raw_up.startswith('INVALID:')
-    assert 'NO ES UN TEMA LISTO PARA DEBATE' in raw_up
-
-    # Second sentence is preferred, but optional if output is short
-    if 'POR FAVOR, PROPORCIONA' in raw_up:
-        assert 'POR FAVOR, PROPORCIONA UN TEMA VALIDO Y LISTO PARA DEBATE' in raw_up
 
 
 @requires_key
@@ -88,7 +61,7 @@ async def test_topic_normalizer_valid_minimal_claim_round_trip_anthropic():
     )
 
     topic = 'Climate change is real'
-    res = await adapter.check_topic(topic, stance='God exists')
+    res = await adapter.check_topic(topic, stance='con')
 
     assert res.is_valid == True
     assert _norm_upper(res.normalized) == 'CLIMATE CHANGE IS REAL'

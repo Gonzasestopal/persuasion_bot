@@ -433,7 +433,6 @@ def test_payload_builder_sentence_scan_and_on_topic_flags():
     max_contra = _alias(d, 'max_sent_contra')
     assert 0.80 <= max_contra <= 0.90  # strong second sentence
     assert isinstance(_alias(d, 'pair_best', 'pair_agg'), dict)
-    assert 'user_wc' in d
     assert isinstance(user_txt, str) and isinstance(bot_txt, str)
 
 

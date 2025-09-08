@@ -194,7 +194,7 @@ def test_turn0_good_topic_es_skips_gate_and_opens_normally(client):
     # No ES gate one-liner
     assert 'PROPORCIONA UN TEMA VALIDO Y LISTO PARA DEBATE' not in up
 
-    has_opening_phrase = ' CON GUSTO TOMARE EL LADO ' in up
+    has_opening_phrase = 'Defenderé la proposición' in up
     has_stance_token = bool(re.search(r'\bPRO\b', up))
     assert has_opening_phrase or has_stance_token, (
         f'Expected stance/opening. Got: {bot!r}'

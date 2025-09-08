@@ -85,7 +85,7 @@ def test_offtopic_request_uses_template_and_is_short(client):
     a2 = _last_bot_msg(r2.json())
 
     # Must refocus with EXACT sentence per your spec (Spanish template)
-    expected = f'n el tema {topic} y en este idioma es.'
+    expected = f'Mantengámonos en el tema'
     assert expected in a2, f'Expected off-topic template line.\nGot:\n{a2}'
 
     # Exactly ONE probing question

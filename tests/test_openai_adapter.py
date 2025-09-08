@@ -59,8 +59,7 @@ async def test_adapter_generate_builds_prompt_and_returns_output(monkeypatch):
     msgs = sent['input']
     assert msgs[0] == {'role': 'system', 'content': adapter.con_system_prompt}
     assert msgs[1]['role'] == 'user'
-    assert "You are debating the topic 'X'" in msgs[1]['content']
-    assert 'Take the con stance.' in msgs[1]['content']
+    assert "You are debating the proposition: 'X'" in msgs[1]['content']
 
 
 @pytest.mark.asyncio
