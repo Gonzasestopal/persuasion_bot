@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Iterable, List, Optional
 
@@ -78,33 +79,35 @@ class AnthropicAdapter(LLMPort):
         mapped = self._map_history(messages)
         return await self._request(messages=mapped, system=self.system_prompt)
 
-    def _topic_gate_system_prompt(self, topic) -> str:
+    def _topic_gate_system_prompt(self, topic, stance) -> str:
         # Keep this tiny and strict; output must be a single line.
-        return TOPIC_CHECKER_SYSTEM_PROMPT.format(
-            TOPIC=topic,
+        return TOPIC_CHECKER_SYSTEM_PROMPT.replace('{TOPIC}', topic).replace(
+            '{STANCE}', stance
         )
 
-    async def check_topic(self, topic: str, language: str = 'en') -> dict:
+    async def check_topic(self, topic: str, stance: str) -> TopicResult:
         """
-        Returns:
+        Returns TopicResult shaped like:
             {
-            "is_valid": "true" | "false",
+            "is_valid": True|False,
             "reason": "<one-liner if invalid or ''>",
             "normalized": "<normalized claim or None>",
-            "raw": "<model raw text>"
+            "raw": "<model raw text>",
+            "stance_normalized": "<pro|con or None>",
             }
         """
-        sys = self._topic_gate_system_prompt(topic=topic)
+        sys = self._topic_gate_system_prompt(topic=topic, stance=stance)
 
-        # IMPORTANT: user content must NOT be the system prompt
+        # IMPORTANT: Send the inputs exactly as the system prompt expects.
+        # (Uppercase keys to reduce brittleness.)
         user_prompt = (
-            f'Topic: {topic}\n'
-            f'Language hint: {language}\n'
+            f'TOPIC: {topic}\n'
+            f'STANCE: {stance}\n'
             'Return exactly one line as specified in the system instructions.'
         )
 
         resp = await self.client.messages.create(
-            model=self.model,  # ensure this is a valid Anthropic model id string
+            model=self.model,
             system=sys,
             messages=[
                 {
@@ -112,8 +115,10 @@ class AnthropicAdapter(LLMPort):
                     'content': [{'type': 'text', 'text': user_prompt}],
                 }
             ],
-            temperature=0.0,  # deterministic
-            max_tokens=16,  # tiny budget; allow room for 'VALID: <topic>'
+            temperature=0.0,
+            max_tokens=max(
+                self.max_output_tokens, 64
+            ),  # allow enough room for the JSON
         )
 
         out = ''.join(
@@ -122,34 +127,84 @@ class AnthropicAdapter(LLMPort):
             if getattr(block, 'type', None) == 'text'
         ).strip()
 
-        up = out.upper().strip()
-
-        # 1) INVALID: (full one-liner, localized). Keep the raw line as 'reason'.
-        if up.startswith('INVALID'):
+        # 1) INVALID (strict localized one-liner). Keep raw line in 'reason'.
+        up = out.upper()
+        if up.startswith('INVALID:'):
             return TopicResult(
                 is_valid=False,
-                reason=out,
                 normalized=None,
+                reason=out,
+                normalized_stance=None,  # no stance if invalid
+                raw=out,
+            )
+        try:
+            obj = json.loads(out)
+        except json.JSONDecodeError:
+            # (Optional) legacy compatibility: accept "VALID: <normalized>" fallback
+            m = re.match(r'^\s*VALID\s*:\s*(.+?)\s*$', out, flags=re.IGNORECASE)
+            if m:
+                normalized = m.group(1).strip()
+                return TopicResult(
+                    is_valid=True,
+                    normalized=normalized,
+                    reason='',
+                    normalized_stance=stance,  # we didn't get stance_final; keep requested
+                    raw=out,
+                )
+            # Unrecognized format
+            return TopicResult(
+                is_valid=False,
+                normalized=None,
+                reason='unrecognized',
+                normalized_stance=None,
+                raw=out,
             )
 
-        # 2) VALID: <normalized_topic>
-        m = re.match(r'^\s*VALID\s*:\s*(.+?)\s*$', out, flags=re.IGNORECASE)
-        if m:
-            normalized = m.group(1)
+        # Validate minimal schema (be strict but helpful)
+        required_keys = {
+            'status',
+            'lang',
+            'topic_raw',
+            'topic_normalized',
+            'polarity_raw',
+            'polarity_normalized',
+            'stance_requested',
+            'stance_final',
+        }
+        if not isinstance(obj, dict) or set(obj.keys()) != required_keys:
             return TopicResult(
-                is_valid=True,
-                normalized=normalized,
+                is_valid=False,
+                normalized=None,
+                reason='unrecognized',
+                normalized_stance=None,
+                raw=out,
             )
 
-        # (optional) backward-compat: accept exact "VALID" with no payload
-        if up == 'VALID':
+        if obj.get('status') != 'VALID':
+            # If the model returned JSON but not VALID, treat as invalid text.
             return TopicResult(
-                is_valid=True,
-                normalized=topic,
+                is_valid=False,
+                normalized=None,
+                reason='unrecognized',
+                normalized_stance=None,
+                raw=out,
             )
-        # 3) Fallback
+
+        normalized: str = obj.get('topic_normalized') or ''
+        stance_final: Optional[str] = obj.get('stance_final')
+        if not normalized.strip() or stance_final not in {'pro', 'con'}:
+            return TopicResult(
+                is_valid=False,
+                normalized=None,
+                reason='unrecognized',
+                normalized_stance=None,
+                raw=out,
+            )
+
         return TopicResult(
-            is_valid=False,
-            reason='unrecognized',
-            normalized=None,
+            is_valid=True,
+            normalized=normalized.strip(),
+            reason='',
+            normalized_stance=stance_final,
+            raw=out,
         )
