@@ -111,7 +111,7 @@ def make_fallback_llm():
 @lru_cache(maxsize=1)
 def get_llm_singleton():
     # Build once per process
-    return make_fallback_llm()
+    return make_openai()
 
 
 @lru_cache(maxsize=1)

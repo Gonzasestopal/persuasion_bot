@@ -61,8 +61,20 @@ class OpenAIAdapter(LLMPort):
             for m in messages
         ]
 
-    async def debate(self, messages: List[Message]) -> str:
+    async def debate(
+        self,
+        messages: List[Message],
+        *,
+        context_footer: Optional[str] = None,  # <-- NEW
+    ) -> str:
         mapped = self._map_history(messages)
-        input_msgs = [{'role': 'system', 'content': self.system_prompt}]
+
+        # If provided, append footer at the end of the system prompt.
+        system = self.system_prompt
+        if context_footer:
+            # Ensure it’s on its own line and does not interfere with rules.
+            system = f'{system.rstrip()}\n\n{context_footer}'
+
+        input_msgs = [{'role': 'system', 'content': system}]
         input_msgs.extend(mapped)
         return self._request(input_msgs)
