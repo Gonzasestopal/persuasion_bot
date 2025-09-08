@@ -12,7 +12,10 @@ class TopicResult:
 
 @dataclass
 class JudgeResult:
-    verdict: str  # "SAME" | "OPPOSITE" | "UNKNOWN"
-    concession: bool
+    accept: bool
+    ended: bool
+    reason: str  # short snake_case reason from the judge
+    assistant_reply: (
+        str  # the assistant's next turn (language-locked, ≤80 words, 1 question)
+    )
     confidence: float  # 0..1
-    reason: str  # short snake_case

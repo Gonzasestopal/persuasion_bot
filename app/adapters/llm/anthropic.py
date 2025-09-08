@@ -209,20 +209,19 @@ class AnthropicAdapter(LLMPort):
 
     async def nli_judge(self, *, payload: Jsonable) -> JudgeResult:
         """
-        Send a single JSON payload to the LLM (Anthropic) with the given `system` prompt.
-        Expects a single-line JSON response with keys:
-            verdict: "SAME" | "OPPOSITE" | "UNKNOWN"
-            concession: bool
-            confidence: float (0..1)
-            reason: short string
-        Returns a JudgeDecision; raises ValueError on parse/validation failure.
+        Calls the judge with the NLI payload and returns a structured JudgeResult:
+          - accept: bool
+          - ended: bool
+          - reason: str
+          - assistant_reply: str
+          - confidence: float (0..1)
+        Raises ValueError on invalid responses.
         """
-        # Serialize compactly; if payload is a dataclass, pass asdict(payload)
         user_text = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
 
         resp = await self.client.messages.create(
             model=self.model,
-            system=JUDGE_SYSTEM_PROMPT,  # <-- use the provided system prompt
+            system=JUDGE_SYSTEM_PROMPT,
             messages=[
                 {
                     'role': 'user',
@@ -230,34 +229,41 @@ class AnthropicAdapter(LLMPort):
                 }
             ],
             temperature=0.0,
-            max_tokens=160,
+            max_tokens=220,
         )
 
         out = self._parse_single_text(resp).strip()
-
-        # Parse JSON
         try:
             obj = json.loads(out)
         except json.JSONDecodeError as e:
             raise ValueError(f'LLM judge returned non-JSON: {out!r}') from e
 
-        # Minimal schema validation + normalization
-        verdict = str(obj.get('verdict', '')).upper()
-        concession = bool(obj.get('concession', False))
-        reason = str(obj.get('reason', '') or '')
+        if not isinstance(obj, dict):
+            raise ValueError('LLM judge: non-object JSON')
+
+        # Required fields
+        if 'assistant_reply' not in obj or 'reason' not in obj:
+            raise ValueError('LLM judge: missing assistant_reply or reason')
+
+        accept = bool(obj.get('accept', False))
+        ended = bool(obj.get('ended', False))
+        reason = str(obj.get('reason') or '')
+        assistant_reply = str(obj.get('assistant_reply') or '')
         try:
             confidence = float(obj.get('confidence', 0.0))
-        except (TypeError, ValueError) as e:
-            raise ValueError(f'Invalid confidence: {obj.get("confidence")!r}') from e
+        except (TypeError, ValueError):
+            confidence = 0.0
 
-        if verdict not in {'SAME', 'OPPOSITE', 'UNKNOWN'}:
-            raise ValueError(f'Invalid verdict: {verdict!r}')
-        if not (0.0 <= confidence <= 1.0):
-            raise ValueError(f'Confidence out of range: {confidence!r}')
+        # Basic validation
+        if not assistant_reply or not reason:
+            raise ValueError('LLM judge: empty assistant_reply or reason')
+        if confidence < 0.0 or confidence > 1.0:
+            confidence = max(0.0, min(1.0, confidence))
 
         return JudgeResult(
-            verdict=verdict,
-            concession=concession,
-            confidence=confidence,
+            accept=accept,
+            ended=ended,
             reason=reason,
+            assistant_reply=assistant_reply,
+            confidence=confidence,
         )
