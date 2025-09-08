@@ -37,18 +37,6 @@ class ConcessionService:
     - Includes sentence-level scan for thesis contradiction (max across sentences).
     """
 
-    # De-emphasize pure acknowledgments as “claims”
-    ACK_PREFIXES = (
-        "you're right",
-        'you are right',
-        'indeed',
-        'i agree',
-        'good point',
-        'correct',
-        'fair point',
-        'exactly',
-    )
-
     def __init__(
         self,
         llm: LLMPort,
@@ -164,7 +152,7 @@ class ConcessionService:
         claims = self._extract_claims(bot_txt)
 
         # Canonical thesis sentences for stance (self/opp)
-        clean_topic = self._clean_topic_for_nli(topic)
+        clean_topic = topic
         canon_self = self._canonical_stance(clean_topic, stance)
         canon_opp = self._canonical_stance(
             clean_topic, Stance.CON if stance == Stance.PRO else Stance.PRO
@@ -329,31 +317,6 @@ class ConcessionService:
 
     # ----------------------------- helpers -----------------------------
 
-    ACK_PREFIXES = (
-        "you're right",
-        'you are right',
-        'indeed',
-        'i agree',
-        'good point',
-        'correct',
-        'fair point',
-        'exactly',
-    )
-
-    @staticmethod
-    def _clean_topic_for_nli(topic: str) -> str:
-        """
-        Remove accidental meta like 'Language: EN', 'Side: PRO', 'Topic: ...'
-        Keep only the proposition's first sentence.
-        """
-        s = topic
-        s = re.sub(r'\b(Language|Idioma)\s*:\s*[A-Za-z]{2}\b\.?', '', s, flags=re.I)
-        s = re.sub(r'\b(Side|Lado)\s*:\s*(PRO|CON)\b\.?', '', s, flags=re.I)
-        s = re.sub(r'\b(Topic|Tema)\s*:\s*', '', s, flags=re.I)
-        s = s.strip().strip('.')
-        s = s.split('.')[0].strip()
-        return s
-
     @staticmethod
     def _topic_statement(clean_topic: str) -> str:
         return clean_topic.rstrip('.') + '.'
@@ -411,24 +374,6 @@ class ConcessionService:
         on = has_signal(ph) or has_signal(hp)
         logger.debug('[topic] on_topic=%s | agg=%s', on, round3(agg_max(thesis_scores)))
         return on
-
-    @staticmethod
-    def _clean_topic_for_nli(topic: str) -> str:
-        s = topic or ''
-        s = re.sub(r'\b(Language|Idioma)\s*:\s*[A-Za-z]{2}\b\.?', '', s, flags=re.I)
-        s = re.sub(r'\b(Side|Lado)\s*:\s*(PRO|CON)\b\.?', '', s, flags=re.I)
-        s = re.sub(r'\b(Topic|Tema)\s*:\s*', '', s, flags=re.I)
-        s = re.sub(r'^\s*i\s+(think|believe)\s+(that\s+)?', '', s, flags=re.I)
-        s = re.sub(r'^\s*in\s+my\s+opinion\s*,?\s*', '', s, flags=re.I)
-        s = s.strip().strip('.')
-        s = s.split('.')[0].strip()
-        # unwrap "It is (not the case|false) that X"
-        m = re.match(
-            r'^it\s+is\s+(?:not\s+the\s+case|false)\s+that\s+(.+)$', s, flags=re.I
-        )
-        if m:
-            s = m.group(1).strip()
-        return s
 
     @staticmethod
     def _polarity_variants(t: str) -> Tuple[str, str]:

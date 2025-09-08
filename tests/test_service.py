@@ -93,7 +93,7 @@ async def test_start_conversation_invalid_topic_raises_invalidtopic(
     parser.assert_called_once_with(user_msg)
 
     # Topic checker consulted with (message, stance)
-    topic_checker.check_topic.assert_awaited_once_with(user_msg, 'con')
+    topic_checker.check_topic.assert_awaited_once_with('X', 'con')
 
     # No downstream work
     repo.create_conversation.assert_not_called()
@@ -112,7 +112,10 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
     topic_checker = SimpleNamespace(
         check_topic=AsyncMock(
             return_value=CheckerResult(
-                True, reason='', normalized='God exists', normalized_stance=None
+                is_valid=True,
+                reason='',
+                normalized='God exists',
+                normalized_stance='con',
             )
         )
     )
@@ -138,7 +141,7 @@ async def test_start_conversation_valid_topic_flows_normally(repo, llm, debate_s
     out = await svc.handle(message=user_msg)
 
     # Topic checker used with (message, stance)
-    topic_checker.check_topic.assert_awaited_once_with(user_msg, 'con')
+    topic_checker.check_topic.assert_awaited_once_with('God exists', 'con')
 
     # Conversation created with normalized topic and original stance
     repo.create_conversation.assert_awaited_once_with(topic='God exists', stance='con')
@@ -206,7 +209,7 @@ async def test_start_conversation_uses_normalized_stance_if_provided(
     out = await svc.handle(message=user_msg)
 
     # Topic checker called with (message, stance)
-    topic_checker.check_topic.assert_awaited_once_with(user_msg, 'con')
+    topic_checker.check_topic.assert_awaited_once_with('X', 'con')
 
     # Conversation created using normalized topic AND normalized stance
     repo.create_conversation.assert_awaited_once_with(topic='God exists', stance='pro')

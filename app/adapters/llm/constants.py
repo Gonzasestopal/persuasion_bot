@@ -188,38 +188,80 @@ Inputs (provided in the user message):
 - {TOPIC}: raw topic line the user wrote (may include hedges or double negatives).
 - {STANCE}: the requested stance ("pro" or "con") indicating how the bot should respond relative to the user's raw topic.
 
-Your tasks, in order:
-1) Decide if {TOPIC} is a clear, debate-ready claim (a proposition one can argue for or against).
-2) If debate-ready, normalize it:
-   - Keep the output in the detected language (en, es, or pt) based on the topic text itself.
-   - Remove hedges like: "I think", "I don’t think", "I believe", "it seems that", "in my opinion" (and equivalents in es/pt).
-   - Collapse double negatives into a single positive or negative (e.g., "not not X" → "X"; "does not not exist" → "exists").
-   - Prefer a short, minimal, declarative sentence without first-person viewpoint or modality when possible.
-   - Preserve the original meaning and stance; do not change polarity except for collapsing explicit double negatives.
-3) Compute polarity:
-   - "neg" if the normalized statement asserts a negation (e.g., "God does not exist").
-   - "pos" if it asserts an affirmative (e.g., "God exists").
-   - Determine also the raw polarity from {TOPIC} by considering negators and contraction expansions ("don't" → "do not").
-4) Adjust the stance:
-   - Start with {STANCE} as the requested stance ("pro" supports the topic; "con" opposes it).
-   - If raw polarity and normalized polarity differ (i.e., normalization flipped polarity), then invert the stance:
-       pro ↔ con
-   - Otherwise keep the stance as requested.
+Your tasks, in order (apply ALL deterministically):
+1) Debate-readiness:
+   - {TOPIC} must be a clear, arguable proposition (a sentence that can be supported or opposed).
+   - If not debate-ready, output INVALID using the STRICT template (see bottom).
+
+2) Normalization (keep the detected language for output: en, es, or pt):
+   - Remove hedges like:
+     en: ["I think","I don’t think","I don't think","I believe","it seems that","in my opinion"]
+     es: ["creo que","pienso que","no creo que","me parece que","en mi opinión"]
+     pt: ["acho que","penso que","não acho que","me parece que","na minha opinião"]
+   - Expand contractions (en): "don't"→"do not", "doesn't"→"does not", "can't"→"cannot", etc.
+   - Collapse explicit double negatives: e.g., "does not not exist"→"exists", "not impossible"→"possible".
+   - Prefer a short, minimal, declarative sentence (no first person, no modality) while preserving meaning.
+
+3) Polarity (two values):
+   - polarity_raw: computed from {TOPIC} AFTER contraction expansion but BEFORE hedge removal and double-negative collapse.
+   - polarity_normalized: computed from the final normalized sentence.
+   - Rules:
+     - pos if the sentence asserts an affirmative claim (e.g., "God exists")
+     - neg if it asserts a negation (e.g., "God does not exist")
+
+4) Stance adjustment:
+   - Start from stance_requested = {STANCE} ("pro" supports the claim; "con" opposes it).
+   - If polarity_raw != polarity_normalized (a flip occurred during normalization), then invert stance:
+       pro↔con
+   - Else keep stance as requested.
+   - The final result is stance_final.
+
 5) Language:
    - Detect from {TOPIC}; choose exactly one of: en, es, pt.
-   - The normalized topic must be in that detected language.
+   - topic_normalized must be in the detected language.
 
 STRICT output formats (single line only):
-- If NOT debate-ready: output exactly ONE line in the detected language, using ONLY the matching template:
+- If NOT debate-ready (use detected language):
   en: INVALID: "{TOPIC}" isn't debate-ready. Please provide a valid, debate-ready topic.
   es: INVALID: "{TOPIC}" no es un tema listo para debate. Por favor, proporciona un tema válido y listo para debate.
   pt: INVALID: "{TOPIC}" não é um tópico pronto para debate. Por favor, forneça um tópico válido e pronto para debate.
 
 - If debate-ready: output exactly ONE line of minified JSON with these keys (and no others):
-  {{"status":"VALID","lang":"<en|es|pt>","topic_raw":"<verbatim {TOPIC}>","topic_normalized":"<normalized>","polarity_raw":"<pos|neg>","polarity_normalized":"<pos|neg>","stance_requested":"<pro|con>","stance_final":"<pro|con>"}}
+  {"status":"VALID","lang":"<en|es|pt>","topic_raw":"<verbatim {TOPIC}>","topic_normalized":"<normalized>",
+   "polarity_raw":"<pos|neg>","polarity_normalized":"<pos|neg>","stance_requested":"<pro|con>","stance_final":"<pro|con>"}
 
 ABSOLUTE RULES:
-- Single line only. No extra commentary, no Markdown.
-- For INVALID, do not output JSON; use the exact sentence template above.
+- Single line only. No extra commentary, no Markdown, no code fences.
+- For INVALID, do NOT output JSON; use the exact sentence template above.
 - For VALID, output ONLY the JSON object described above (no trailing text).
+
+EXAMPLES (MUST FOLLOW EXACTLY):
+
+# EN double negative + hedge (the tricky case that MUST flip)
+INPUT:
+TOPIC: I don’t think God does not exist
+STANCE: con
+OUTPUT:
+{"status":"VALID","lang":"en","topic_raw":"I don’t think God does not exist","topic_normalized":"God exists","polarity_raw":"neg","polarity_normalized":"pos","stance_requested":"con","stance_final":"pro"}
+
+# EN straightforward negative
+INPUT:
+TOPIC: God does not exist
+STANCE: con
+OUTPUT:
+{"status":"VALID","lang":"en","topic_raw":"God does not exist","topic_normalized":"God does not exist","polarity_raw":"neg","polarity_normalized":"neg","stance_requested":"con","stance_final":"con"}
+
+# ES hedge removal + affirmation
+INPUT:
+TOPIC: No creo que Dios no exista
+STANCE: pro
+OUTPUT:
+{"status":"VALID","lang":"es","topic_raw":"No creo que Dios no exista","topic_normalized":"Dios existe","polarity_raw":"neg","polarity_normalized":"pos","stance_requested":"pro","stance_final":"con"}
+
+# PT affirmation
+INPUT:
+TOPIC: Deus existe
+STANCE: con
+OUTPUT:
+{"status":"VALID","lang":"pt","topic_raw":"Deus existe","topic_normalized":"Deus existe","polarity_raw":"pos","polarity_normalized":"pos","stance_requested":"con","stance_final":"con"}
 """

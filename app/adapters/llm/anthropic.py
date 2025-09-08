@@ -140,17 +140,6 @@ class AnthropicAdapter(LLMPort):
         try:
             obj = json.loads(out)
         except json.JSONDecodeError:
-            # (Optional) legacy compatibility: accept "VALID: <normalized>" fallback
-            m = re.match(r'^\s*VALID\s*:\s*(.+?)\s*$', out, flags=re.IGNORECASE)
-            if m:
-                normalized = m.group(1).strip()
-                return TopicResult(
-                    is_valid=True,
-                    normalized=normalized,
-                    reason='',
-                    normalized_stance=stance,  # we didn't get stance_final; keep requested
-                    raw=out,
-                )
             # Unrecognized format
             return TopicResult(
                 is_valid=False,
@@ -163,15 +152,12 @@ class AnthropicAdapter(LLMPort):
         # Validate minimal schema (be strict but helpful)
         required_keys = {
             'status',
-            'lang',
-            'topic_raw',
             'topic_normalized',
-            'polarity_raw',
-            'polarity_normalized',
-            'stance_requested',
             'stance_final',
         }
-        if not isinstance(obj, dict) or set(obj.keys()) != required_keys:
+
+        if not isinstance(obj, dict) or required_keys - obj.keys():
+            print('rip', obj.keys())
             return TopicResult(
                 is_valid=False,
                 normalized=None,

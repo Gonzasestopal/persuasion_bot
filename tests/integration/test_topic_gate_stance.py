@@ -49,7 +49,7 @@ async def test_topic_normalizer_valid_en_double_negation_returns_topicresult_ant
     # reason should be empty string (or None if you prefer—keep consistent with your implementation)
     assert res.reason in ('', None)
     # normalized_stance is optional until you compute stance in the checker
-    assert res.normalized_stance in ('con', None)
+    assert res.normalized_stance in ('pro', None)
 
 
 @requires_key

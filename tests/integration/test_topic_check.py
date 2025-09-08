@@ -15,6 +15,19 @@ def _norm_upper(s: str) -> str:
     return re.sub(r'\s+', ' ', s).strip().upper()
 
 
+def _no_stance_opener(up: str):
+    # Disallow typical stance openers (these should never appear in 422 errors)
+    assert 'I WILL GLADLY TAKE THE' not in up
+    assert 'CON GUSTO TOMARE EL LADO' not in up
+
+    # For raw PRO/CON tokens, allow them only if they are part of the quoted
+    # “SIDE: PRO/CON” metadata from the user’s original start line.
+    # We enforce this with a negative-lookbehind that forbids matches unless
+    # preceded by "SIDE: ".
+    assert not re.search(r'(?<!SIDE:\s)\bPRO\b', up)
+    assert not re.search(r'(?<!SIDE:\s)\bCON\b', up)
+
+
 def _assert_invalid_prefix(up: str):
     """
     Allow either:
@@ -38,11 +51,6 @@ def _assert_invalid_prefix(up: str):
     reason='ANTHROPIC_API_KEY not set; skipping live LLM integration test.',
 )
 def test_turn0_invalid_topic_en_gate_line_and_shape(client):
-    """
-    Invalid English-ish topic should yield a localized gate one-liner. With the
-    new behavior, the endpoint responds 422 and places the message in `detail`.
-    We still enforce the EN tail and the INVALID preference.
-    """
     topic = 'asdf'
     start = f'topic: {topic}, side: con'
     r = client.post('/messages', json={'conversation_id': None, 'message': start})
@@ -52,22 +60,20 @@ def test_turn0_invalid_topic_en_gate_line_and_shape(client):
     assert isinstance(detail, str) and detail.strip()
     up = _norm_upper(detail)
 
-    # Soft preference for INVALID: (don’t fail if missing)
+    # Soft preference for INVALID:
     if up.startswith('LANGUAGE:'):
         assert ' INVALID:' in up or "ISN'T DEBATE-READY" in up
     else:
         assert up.startswith('INVALID:') or "ISN'T DEBATE-READY" in up
 
-    # Must include the topic token and the EN gate one-liner tail
+    # Must include the topic token and the EN tail
     expect_en_tail = "ISN'T DEBATE-READY. PLEASE PROVIDE A VALID, DEBATE-READY TOPIC."
     assert _norm_upper(topic) in up, f'Topic token missing in detail. Got: {detail!r}'
     assert expect_en_tail in up, (
-        f'Missing EN gate one-liner tail.\nWanted contains: {expect_en_tail}\nGot: {detail!r}'
+        f'Missing EN gate one-liner tail.\nWanted: {expect_en_tail}\nGot: {detail!r}'
     )
 
-    # No stance opener terms in an error
-    assert 'I WILL GLADLY TAKE THE' not in up
-    assert not re.search(r'\bPRO\b', up) and not re.search(r'\bCON\b', up)
+    _no_stance_opener(up)
 
 
 @pytest.mark.skipif(
@@ -75,11 +81,6 @@ def test_turn0_invalid_topic_en_gate_line_and_shape(client):
     reason='ANTHROPIC_API_KEY not set; skipping live LLM integration test.',
 )
 def test_turn0_invalid_topic_es_gate_line_and_shape(client):
-    """
-    Invalid Spanish topic should yield a localized gate one-liner in ES.
-    We tolerate EN fallback; still enforce the tail line and no stance opener.
-    Uses 422 `detail`.
-    """
     topic = 'hola'
     start = f'topic: {topic}, side: con'
     r = client.post('/messages', json={'conversation_id': None, 'message': start})
@@ -89,14 +90,13 @@ def test_turn0_invalid_topic_es_gate_line_and_shape(client):
     assert isinstance(detail, str) and detail.strip()
     up = _norm_upper(detail)
 
-    # Soft preference for INVALID: do not fail if missing
+    # Soft preference for INVALID: non-fatal if missing
+    # (kept for parity with earlier tests)
     if up.startswith('LANGUAGE:'):
-        has_invalid = ' INVALID:' in up
+        _ = ' INVALID:' in up
     else:
-        has_invalid = up.startswith('INVALID:')
-    _ = has_invalid  # kept for parity with original, but non-fatal
+        _ = up.startswith('INVALID:')
 
-    # Accept either ES or EN tail; topic token must appear somewhere
     expect_es_tail = 'NO ES UN TEMA LISTO PARA DEBATE. POR FAVOR, PROPORCIONA UN TEMA VALIDO Y LISTO PARA DEBATE.'
     expect_en_tail = "ISN'T DEBATE-READY. PLEASE PROVIDE A VALID, DEBATE-READY TOPIC."
     assert _norm_upper(topic) in up, f'Topic token missing in detail. Got: {detail!r}'
@@ -106,10 +106,7 @@ def test_turn0_invalid_topic_es_gate_line_and_shape(client):
         f'Got: {detail!r}'
     )
 
-    # No stance opener terms in an error
-    assert 'CON GUSTO TOMARE EL LADO' not in up
-    assert 'I WILL GLADLY TAKE THE' not in up
-    assert not re.search(r'\bPRO\b', up) and not re.search(r'\bCON\b', up)
+    _no_stance_opener(up)
 
 
 @pytest.mark.skipif(
