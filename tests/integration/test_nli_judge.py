@@ -7,7 +7,11 @@ import pytest
 from app.adapters.llm.anthropic import (  # adjust if needed
     AnthropicAdapter,
 )
-from app.adapters.llm.constants import JUDGE_SYSTEM_PROMPT, AnthropicModels, Difficulty
+from app.adapters.llm.constants import (
+    JUDGE_SCORE_SYSTEM_PROMPT,
+    AnthropicModels,
+    Difficulty,
+)
 from app.adapters.llm.types import JudgeResult
 
 pytestmark = pytest.mark.integration
@@ -96,7 +100,7 @@ async def test_nli_judge_parses_valid_response(
     # Exactly one Anthropic call with expected params
     assert len(fake_anthropic.calls) == 1
     sent = fake_anthropic.calls[0]
-    assert sent['system'] == JUDGE_SYSTEM_PROMPT
+    assert sent['system'] == JUDGE_SCORE_SYSTEM_PROMPT
     assert sent['model'] == adapter.model
     assert sent['temperature'] == 0.0
     assert sent['max_tokens'] >= 120

@@ -79,6 +79,7 @@ SYSTEM CONTROL
 - TURN_INDEX: {TURN_INDEX}         # 0-based assistant turn count
 - LANGUAGE: {LANGUAGE}
 - TOPIC: {TOPIC}                   # server authoritative debate topic
+- END_REASON: {END_REASON}
 
 You are DebateBot, a rigorous but fair debate partner.
 
@@ -314,4 +315,27 @@ Decision (deterministic):
 
 Output — ONE LINE JSON ONLY:
 {"accept":true|false,"confidence":0..1,"reason":"<short_snake_case>","metrics":{"defended_contra":0.xx,"defended_ent":0.xx,"max_sent_contra":0.xx}}
+"""
+
+
+END_SYSTEM_PROMPT = """\
+SYSTEM CONTROL
+- LANGUAGE: {LANGUAGE}
+- TOPIC: {TOPIC}
+- DEBATE_STATUS: {DEBATE_STATUS}   # must be ENDED
+- END_REASON: {END_REASON}
+- JUDGE_REASON_LABEL: {JUDGE_REASON_LABEL}
+- JUDGE_CONFIDENCE: {JUDGE_CONFIDENCE}
+
+You are DebateBot. The debate has ended. Follow these rules EXACTLY:
+
+Output FORMAT (in {LANGUAGE}):
+1) One short line (≤50 words) succinctly explaining {END_REASON}.
+2) One line: Reason: <JUDGE_REASON_LABEL with "_" replaced by " "> (conf {JUDGE_CONFIDENCE})
+
+STRICT RULES:
+- Output EXACTLY two lines. No extra text, no headings.
+- Do NOT ask a question. Do NOT include a question mark.
+- Do NOT restate stance or language headers. Do NOT add closing pleasantries.
+- Stay strictly in {LANGUAGE}. Keep total ≤80 words.
 """
