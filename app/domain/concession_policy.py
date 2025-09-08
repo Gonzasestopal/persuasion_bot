@@ -8,7 +8,9 @@ from app.settings import settings
 @dataclass(frozen=True)
 class ConcessionPolicy:
     required_positive_judgements: int = settings.REQUIRED_POSITIVE_JUDGEMENTS
-    max_assistant_turns: int = 9  # hard cap on assistant turns
+    max_assistant_turns: int = (
+        settings.MAX_ASSISTANT_TURNS
+    )  # hard cap on assistant turns
 
 
 DebateStatus = Literal['ONGOING', 'ENDED']

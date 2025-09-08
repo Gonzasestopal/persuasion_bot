@@ -18,7 +18,8 @@ An LLM-based chatbot that takes in messages from a user, processes them, and gen
 14. [Deployment Guide](#deployment-guide)
 15. [Testing](#testing)
 16. [Debate Argument Evaluation](#debate-evaluation)
-
+17. [Hexagonal Architecture](#hexagonal-architecture)
+18. [Development Process](#development-process)
 
 ---
 
@@ -236,7 +237,7 @@ REQUEST_TIMEOUT_S=25
 LLM_PER_PROVIDER_TIMEOUT_S=12
 
 # --- Winning Rules ---
-MIN_ASSISTANT_TURNS_BEFORE_VERDICT=5
+MAX_ASSISTANT_TURNS=6
 REQUIRED_POSITIVE_JUDGEMENTS=2
 
 ```
@@ -434,7 +435,7 @@ Dogs are humanity’s best friends because they uniquely combine loyalty, emotio
 This type of move exploits the debate rules to bypass meaningful turn-taking. According to our domain requirements, at least five assistant turns must occur and a minimum of two positive judgments must be registered before a concession is even possible:
 
 ```
-min_assistant_turns_before_verdict: int = 5
+max_assistant_turns: int = 9
 required_positive_judgments: int = 2
 ````
 
@@ -451,3 +452,40 @@ Contradiction (disagreement)
 This hybrid approach ensures that concessions are grounded in semantic alignment/contradiction rather than superficial rule-matching, making the debate more resistant to adversarial shortcuts.
 
 </details>
+
+---
+
+<details>
+  <summary>🏗️ Hexagonal Architecture (Ports & Adapters)</summary>
+
+This project follows **Hexagonal Architecture** (Ports & Adapters) to keep the core debate logic clean, testable, and independent of external services.
+
+- **Domain layer** – pure business logic: `DebateState`, `ConcessionPolicy`, `JudgeResult`, etc.
+- **Ports (interfaces)** – abstract contracts (e.g., `LLMPort`, `NLIPort`, `DebateStorePort`).
+- **Adapters** – concrete implementations of ports, such as `OpenAIAdapter`, `AnthropicAdapter`, `PgMessageRepo`.
+- **Application services** – orchestrate flows: `MessageService`, `ConcessionService`, etc.
+- **Infrastructure** – external concerns (Postgres, Redis, HTTP).
+
+**Benefits:**
+- Swappable LLM providers (OpenAI/Anthropic) without touching domain code
+- Easy to test (mock ports)
+- Clear separation of responsibilities
+
+</details>
+
+---
+
+<details>
+  <summary>🧪 Test-Driven Development (TDD)</summary>
+
+We apply **Test-Driven Development (TDD):**
+
+1. **Write the test first** – define the expected behavior in `tests/unit` or `tests/integration`.
+2. **Run and watch it fail** – confirm the test detects the missing feature.
+3. **Implement the minimal code** – add just enough logic in the service or domain.
+4. **Refactor & extend** – clean up, generalize, and ensure all tests pass.
+
+**Testing setup:**
+- `pytest` with async fixtures for service-level tests
+- Unit tests: fast, mocking ports (e.g., fake `LLMPort`)
+- Integration tests: exercise adapters (e.g., hitting Anthropic’s API with real keys)

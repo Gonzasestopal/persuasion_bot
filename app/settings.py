@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     MAX_OUTPUT_TOKENS: int = 120
     LLM_PER_PROVIDER_TIMEOUT_S: float = 12.0
 
-    MIN_ASSISTANT_TURNS_BEFORE_VERDICT: int = 5
+    MAX_ASSISTANT_TURNS: int = 6
     REQUIRED_POSITIVE_JUDGEMENTS: int = 2
 
     class Config:
