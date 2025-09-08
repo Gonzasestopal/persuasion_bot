@@ -270,7 +270,7 @@ class ConcessionService:
 
         payload = NLIJudgePayload(
             topic=thesis,
-            stance=('pro' if stance == Stance.PRO else 'con'),
+            stance='pro',
             user_text=user_txt,
             bot_text=bot_txt,
             thesis_scores={

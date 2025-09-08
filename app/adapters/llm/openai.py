@@ -67,7 +67,12 @@ class OpenAIAdapter(LLMPort):
         )
 
     def _build_user_msg(self, topic: str, stance: Stance) -> str:
-        return f"You are debating the topic '{topic}'.\nTake the {stance} stance.\n\n"
+        return (
+            f"You are debating the proposition: '{topic}'. "
+            f'Defend it exactly as written. Do not switch sides or negate it. '
+            f'Make a concise, evidence-backed case that it is true. '
+            f"Do not mention 'pro' or 'con' unless explicitly asked."
+        )
 
     # ---------- low-level request ----------
     def _request(self, input_msgs: Iterable[dict]) -> str:
